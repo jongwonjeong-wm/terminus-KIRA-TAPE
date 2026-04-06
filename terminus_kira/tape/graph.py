@@ -170,12 +170,15 @@ class PlanGraphBuilder:
             return {}
 
         # Parse groups into a mapping: state_id -> canonical_id
+        valid_ids = set(e["state_id"] for e in state_entries)
         merge_map: dict[str, str] = {}
         for group in result.get("groups", []):
-            if not group:
+            # Filter out any state_ids the LLM hallucinated
+            valid_group = [sid for sid in group if sid in valid_ids]
+            if not valid_group:
                 continue
-            canonical = group[0]
-            for state_id in group:
+            canonical = valid_group[0]
+            for state_id in valid_group:
                 merge_map[state_id] = canonical
         return merge_map
 
@@ -246,6 +249,16 @@ class PlanGraphBuilder:
         node_counter = 0
 
         for state_id, canonical_id in merge_map.items():
+            # Guard: if LLM returned a canonical_id not in state_id_to_info,
+            # fall back to using state_id itself as canonical
+            if canonical_id not in state_id_to_info:
+                logger.warning(
+                    "[TAPE Graph] canonical_id %s not found, falling back to %s",
+                    canonical_id, state_id,
+                )
+                canonical_id = state_id
+                merge_map[state_id] = state_id
+
             if canonical_id not in canonical_to_node_id:
                 info = state_id_to_info[canonical_id]
                 node_id = f"node_{node_counter}"

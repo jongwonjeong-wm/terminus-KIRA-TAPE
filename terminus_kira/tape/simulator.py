@@ -41,15 +41,15 @@ _PROMPT_TEMPLATE_PATH = (
 # Tool description strings (mirroring terminus_kira.py pattern)
 _SUBMIT_STEP_DESC = (
     "Submit simulation result for a single subgoal step. "
-    "The agent analyzes the current terminal state "
-    "(what has been accomplished, what still needs to be done), "
-    "then plans specific commands with expected outcomes, then executes them."
+    "Predict the semantic outcome of executing this subgoal."
 )
 
 _PREDICTED_STATE_DESC = (
-    "What the terminal output would look like after this step (key lines only). "
-    "Consider what commands the agent would run and their expected output. "
-    "Include error output if failure is likely."
+    "Abstract description of what changes after this step. "
+    "Describe WHAT was accomplished (files created, services started, errors hit), "
+    "NOT the literal terminal output. "
+    "Example: 'Compiled successfully, binary created at ./release' "
+    "instead of simulating the actual gcc output."
 )
 
 _SUCCESS_PROBABILITY_DESC = (

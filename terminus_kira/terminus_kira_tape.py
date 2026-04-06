@@ -9,6 +9,7 @@ Overrides _run_agent_loop to add:
 import copy
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,11 +53,23 @@ class TerminusKiraTAPE(TerminusKira):
     def __init__(self, *args, tape_config: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         cfg = tape_config or {}
-        self._tape_m = cfg.get("M", 4)
-        self._tape_time_budget = cfg.get("time_budget", None)
-        self._tape_max_replans = cfg.get("max_replans", 3)
-        # similarity_threshold removed — state merging is now LLM-based
-        self._tape_planner_temperature = cfg.get("planner_temperature", 0.8)
+        # Hyperparameters: tape_config dict -> env var -> default
+        self._tape_m = int(os.environ.get("TAPE_M", cfg.get("M", 4)))
+        self._tape_time_budget_override = (
+            float(os.environ["TAPE_TIME_BUDGET"])
+            if "TAPE_TIME_BUDGET" in os.environ
+            else cfg.get("time_budget", None)
+        )
+        # max_replans: None = unlimited (default), set via env or config to limit
+        _max_replans_raw = os.environ.get(
+            "TAPE_MAX_REPLANS", cfg.get("max_replans", None)
+        )
+        self._tape_max_replans: int | None = (
+            int(_max_replans_raw) if _max_replans_raw is not None else None
+        )
+        self._tape_planner_temperature = float(
+            os.environ.get("TAPE_PLANNER_TEMPERATURE", cfg.get("planner_temperature", 0.8))
+        )
 
         # TAPE components (initialized lazily in _init_tape_components)
         self._tape_planner: TAPEPlanner | None = None
@@ -69,7 +82,7 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_tool_choice: dict | None = None
         self._tape_tools: list[dict] | None = None
         self._tape_replan_count: int = 0
-        self._tape_terminal_history: str = ""  # accumulated terminal output for completion check
+        self._tape_terminal_history: str = ""  # unused, kept for compat
         self._tape_subgoal_injected: bool = False  # whether subgoal was already injected for current step
 
     @staticmethod
@@ -81,13 +94,27 @@ class TerminusKiraTAPE(TerminusKira):
 
     def _init_tape_components(self):
         """Initialize TAPE components once model_name is available."""
+        # Ensure TAPE logs (info+) are visible in job.log
+        tape_logger = logging.getLogger("terminus_kira.tape")
+        if not tape_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+            tape_logger.addHandler(handler)
+            tape_logger.setLevel(logging.INFO)
+        # Also ensure this module's logger is visible
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+
         api_base = getattr(self._llm, "_api_base", None) if self._llm else None
         self._tape_planner = TAPEPlanner(
             self._model_name, api_base, self._tape_m, self._tape_planner_temperature,
         )
         self._tape_simulator = TAPESimulator(self._model_name, api_base)
         self._tape_graph_builder = PlanGraphBuilder(self._model_name, api_base)
-        self._tape_solver = ILPSolver(self._tape_time_budget)
+        self._tape_solver = ILPSolver(self._tape_time_budget_override)
         self._tape_mismatch_checker = MismatchChecker(self._model_name, api_base)
 
     # ------------------------------------------------------------------
@@ -171,6 +198,7 @@ class TerminusKiraTAPE(TerminusKira):
         current_terminal_state: str,
         chat_history_summary: str = "",
         chat: Chat | None = None,
+        logging_dir: Path | None = None,
     ) -> SelectedPath | None:
         """Full TAPE planning pipeline: plan -> simulate -> graph -> ILP."""
         assert self._tape_planner is not None
@@ -182,31 +210,35 @@ class TerminusKiraTAPE(TerminusKira):
         history_context = self._build_history_context(chat, chat_history_summary)
 
         # Step 1: Generate M candidate plans
-        logger.info("[TAPE] Generating candidate plans...")
+        logger.info("[TAPE] Step 1/4: Generating %d candidate plans...", self._tape_m)
         plans = await self._tape_planner.generate_plans(
             task_instruction, current_terminal_state, history_context,
         )
         if not plans:
-            logger.warning("[TAPE] No plans generated")
+            logger.warning("[TAPE] No plans generated — falling back to vanilla")
             return None
+        for p in plans:
+            subgoal_names = [sg.description[:80] for sg in p.subgoals]
+            logger.info("[TAPE]   Plan %d: %d subgoals — %s", p.plan_id, len(p.subgoals), subgoal_names)
 
         # Step 2: Simulate all plans
-        logger.info("[TAPE] Simulating plans...")
+        logger.info("[TAPE] Step 2/4: Simulating %d plans...", len(plans))
         simulated_plans = await self._tape_simulator.simulate_all(
             plans, task_instruction, current_terminal_state, history_context,
         )
         if not simulated_plans:
-            logger.warning("[TAPE] All simulations failed")
+            logger.warning("[TAPE] All simulations failed — falling back to vanilla")
             return None
 
         # Step 3: Build plan graph (LLM-based state merging)
-        logger.info("[TAPE] Building plan graph...")
+        logger.info("[TAPE] Step 3/4: Building plan graph from %d simulated plans...", len(simulated_plans))
         graph = await self._tape_graph_builder.build_graph(
             simulated_plans, current_terminal_state, task_instruction,
         )
+        logger.info("[TAPE]   Graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges))
 
         # Step 4: ILP solve
-        logger.info("[TAPE] Solving ILP...")
+        logger.info("[TAPE] Step 4/4: Solving ILP...")
         selected = self._tape_solver.solve(graph)
 
         if selected is None:
@@ -218,6 +250,17 @@ class TerminusKiraTAPE(TerminusKira):
             "[TAPE] Selected path: %d steps, reward=%.3f, cost=%.1fs",
             selected.total_steps, selected.total_reward, selected.total_cost,
         )
+        for i, edge in enumerate(selected.edges):
+            sg = edge.subgoal
+            if sg is not None:
+                logger.info("[TAPE]   Step %d: [%s] %s", i + 1, sg.predicted_tool.value, sg.description[:100])
+
+        # Dump TAPE pipeline results to logging_dir
+        if logging_dir is not None:
+            self._dump_tape_pipeline(
+                logging_dir, plans, simulated_plans, graph, selected,
+            )
+
         return selected
 
     @staticmethod
@@ -404,6 +447,7 @@ class TerminusKiraTAPE(TerminusKira):
             original_instruction,
             initial_terminal or "",
             chat=chat,
+            logging_dir=logging_dir,
         )
 
         if selected_path is None:
@@ -585,8 +629,7 @@ class TerminusKiraTAPE(TerminusKira):
                     self._execute_commands(commands, self._session)
                 )
 
-            # Accumulate terminal history for completion check
-            self._tape_terminal_history += f"\n---\n{terminal_output}"
+            # terminal_history accumulation removed — step judge uses current output only
 
             # Handle task completion with double-confirmation
             was_pending_completion = self._pending_completion
@@ -629,44 +672,28 @@ class TerminusKiraTAPE(TerminusKira):
                 episode += 1
                 continue
 
-            # --- TWO-STAGE CHECK ---
+            # --- STEP JUDGMENT: ADVANCE or REPLAN ---
             if self._tape_mismatch_checker is not None:
                 status = await self._tape_mismatch_checker.check(
-                    terminal_history=self._tape_terminal_history,
+                    terminal_history="",
                     current_terminal_output=terminal_output,
                     subgoal_description=current_subgoal.description,
                     predicted_state=current_subgoal.predicted_state,
                     task_instruction=original_instruction,
                 )
 
-                if status == SubgoalStatus.IN_PROGRESS:
-                    # Subgoal not done yet — keep same subgoal, continue
-                    logger.debug(
-                        "[TAPE] Subgoal still in progress: %s",
-                        current_subgoal.description,
-                    )
-                    prompt = observation
-                    episode += 1
-                    continue
-
-                if status == SubgoalStatus.COMPLETED_MATCH:
-                    # Subgoal done, state matches — advance
-                    logger.info(
-                        "[TAPE] Subgoal completed (match): %s",
-                        current_subgoal.description,
-                    )
-                    selected_path.current_step_idx += 1
-                    self._tape_terminal_history = ""  # reset for next subgoal
-                    self._tape_subgoal_injected = False  # reset for next subgoal
-                    prompt = observation
-                    episode += 1
-                    continue
-
                 if status == SubgoalStatus.COMPLETED_MISMATCH:
-                    # Subgoal done but state diverged — replan
+                    # REPLAN — state diverged
                     logger.info(
-                        "[TAPE] Subgoal completed (MISMATCH): %s",
+                        "[TAPE] REPLAN at step %d/%d (replan #%d): %s",
+                        selected_path.current_step_idx + 1,
+                        selected_path.total_steps,
+                        self._tape_replan_count + 1,
                         current_subgoal.description,
+                    )
+                    self._dump_tape_judgment(
+                        logging_dir, episode, current_subgoal.description,
+                        "replan", terminal_output,
                     )
                     selected_path, episode = await self._handle_replan(
                         selected_path, current_subgoal,
@@ -679,9 +706,18 @@ class TerminusKiraTAPE(TerminusKira):
                     episode += 1
                     continue
 
-            # Fallback: if mismatch checker is None, just advance
+            # ADVANCE — move to next subgoal (default)
+            self._dump_tape_judgment(
+                logging_dir, episode, current_subgoal.description,
+                "advance", terminal_output,
+            )
+            logger.info(
+                "[TAPE] ADVANCE step %d/%d: %s",
+                selected_path.current_step_idx + 1,
+                selected_path.total_steps,
+                current_subgoal.description,
+            )
             selected_path.current_step_idx += 1
-            self._tape_terminal_history = ""
             self._tape_subgoal_injected = False
             prompt = observation
             episode += 1
@@ -818,7 +854,7 @@ class TerminusKiraTAPE(TerminusKira):
         """Handle replanning after a mismatch. Returns (new_path, episode)."""
         self._tape_replan_count += 1
 
-        if self._tape_replan_count > self._tape_max_replans:
+        if self._tape_max_replans is not None and self._tape_replan_count > self._tape_max_replans:
             logger.warning("[TAPE] Max replans exceeded, switching to vanilla")
             episode += 1
             remaining = self._max_episodes - episode
@@ -838,6 +874,7 @@ class TerminusKiraTAPE(TerminusKira):
                 f"{current_subgoal.description}."
             ),
             chat=chat,
+            logging_dir=logging_dir,
         )
 
         if new_path is None:
@@ -873,3 +910,133 @@ class TerminusKiraTAPE(TerminusKira):
         finally:
             self._max_episodes = original_max
         return result
+
+    # ------------------------------------------------------------------
+    # TAPE Logging
+    # ------------------------------------------------------------------
+
+    def _dump_tape_pipeline(
+        self,
+        logging_dir: Path,
+        plans: list,
+        simulated_plans: list,
+        graph,
+        selected: SelectedPath,
+    ) -> None:
+        """Dump full TAPE pipeline results to tape/ subdirectory."""
+        tape_dir = logging_dir / f"tape-plan-{self._tape_replan_count}"
+        tape_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Raw plans from planner
+        plans_data = []
+        for p in plans:
+            plans_data.append({
+                "plan_id": p.plan_id,
+                "subgoals": [
+                    {
+                        "id": sg.id,
+                        "description": sg.description,
+                        "predicted_tool": sg.predicted_tool.value,
+                    }
+                    for sg in p.subgoals
+                ],
+            })
+        (tape_dir / "1_plans.json").write_text(
+            json.dumps(plans_data, indent=2, ensure_ascii=False)
+        )
+
+        # 2. Simulated plans (with predicted states and probabilities)
+        sim_data = []
+        for p in simulated_plans:
+            sim_data.append({
+                "plan_id": p.plan_id,
+                "total_success_prob": p.total_success_prob,
+                "total_estimated_duration": p.total_estimated_duration,
+                "subgoals": [
+                    {
+                        "id": sg.id,
+                        "description": sg.description,
+                        "predicted_tool": sg.predicted_tool.value,
+                        "predicted_state": sg.predicted_state,
+                        "success_probability": sg.success_probability,
+                        "estimated_duration": sg.estimated_duration,
+                    }
+                    for sg in p.subgoals
+                ],
+            })
+        (tape_dir / "2_simulated.json").write_text(
+            json.dumps(sim_data, indent=2, ensure_ascii=False)
+        )
+
+        # 3. Graph structure
+        graph_data = {
+            "start_node": graph.start_node,
+            "goal_nodes": graph.goal_nodes,
+            "nodes": {
+                nid: {
+                    "state_description": n.state_description,
+                    "is_start": n.is_start,
+                    "is_goal": n.is_goal,
+                }
+                for nid, n in graph.nodes.items()
+            },
+            "edges": {
+                eid: {
+                    "from": e.from_node,
+                    "to": e.to_node,
+                    "reward": e.reward,
+                    "cost": e.cost,
+                    "subgoal": e.subgoal.description if e.subgoal else None,
+                }
+                for eid, e in graph.edges.items()
+            },
+        }
+        (tape_dir / "3_graph.json").write_text(
+            json.dumps(graph_data, indent=2, ensure_ascii=False)
+        )
+
+        # 4. Selected path
+        path_data = {
+            "total_steps": selected.total_steps,
+            "total_reward": selected.total_reward,
+            "total_cost": selected.total_cost,
+            "steps": [
+                {
+                    "edge_id": e.edge_id,
+                    "from": e.from_node,
+                    "to": e.to_node,
+                    "subgoal": e.subgoal.description if e.subgoal else None,
+                    "predicted_tool": e.subgoal.predicted_tool.value if e.subgoal else None,
+                    "predicted_state": e.subgoal.predicted_state if e.subgoal else None,
+                    "reward": e.reward,
+                    "cost": e.cost,
+                }
+                for e in selected.edges
+            ],
+        }
+        (tape_dir / "4_selected_path.json").write_text(
+            json.dumps(path_data, indent=2, ensure_ascii=False)
+        )
+
+        logger.info("[TAPE] Pipeline dumped to %s", tape_dir)
+
+    def _dump_tape_judgment(
+        self,
+        logging_dir: Path | None,
+        episode: int,
+        subgoal_description: str,
+        decision: str,
+        terminal_output: str,
+    ) -> None:
+        """Dump step judge result alongside the episode directory."""
+        if logging_dir is None:
+            return
+        judge_file = logging_dir / f"episode-{episode}" / "tape_judgment.json"
+        judge_file.parent.mkdir(parents=True, exist_ok=True)
+        judge_data = {
+            "episode": episode,
+            "subgoal": subgoal_description,
+            "decision": decision,
+            "terminal_output_snippet": terminal_output[-1000:] if len(terminal_output) > 1000 else terminal_output,
+        }
+        judge_file.write_text(json.dumps(judge_data, indent=2, ensure_ascii=False))

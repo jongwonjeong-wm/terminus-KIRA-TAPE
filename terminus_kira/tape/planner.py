@@ -39,24 +39,15 @@ _SUBMIT_PLAN_DESC = "Submit a high-level plan as a sequence of subgoals."
 _SUBGOALS_DESC = "Ordered list of subgoals to accomplish the task."
 
 _SUBGOAL_DESC = (
-    "What this step accomplishes (specific and actionable). "
-    "The agent will analyze the current terminal state "
-    "(what has been accomplished, what still needs to be done), "
-    "then plan specific commands with expected outcomes. "
-    "Write the subgoal so the agent can form a clear analysis and plan from it."
+    "What this step should ACHIEVE (goal-oriented, not method-oriented). "
+    "Describe the desired outcome, not the specific commands. "
+    "Example: 'Identify which tests are failing and why' "
+    "not 'Run pytest -v and grep for FAILED'."
 )
 
 _PREDICTED_TOOL_DESC = (
     "Which tool the agent should use for this step. "
     "execute_commands: Execute commands in the terminal. "
-    "The agent first analyzes the current state based on the terminal output "
-    "(what do you see? what has been accomplished? what still needs to be done?), "
-    "then describes a plan for the next steps "
-    "(what commands will you run and why? what do you expect each command to accomplish?), "
-    "then provides the commands with wait durations "
-    "(0.1s for immediate tasks like cd/ls/echo/cat, "
-    "1.0s for normal commands like gcc/find/rustc, "
-    "longer for slow commands like make/wget but never >60s). "
     "task_complete: Signal that the task is finished. "
     "image_read: Read and analyze an image file visually."
 )
