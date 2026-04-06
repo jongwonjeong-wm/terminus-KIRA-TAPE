@@ -419,8 +419,13 @@ class TerminusKira(Terminus2):
                 # Extract commands array
                 cmds = arguments.get("commands", [])
                 for cmd in cmds:
-                    keystrokes = cmd.get("keystrokes", "")
-                    duration = cmd.get("duration", 1.0)
+                    if isinstance(cmd, str):
+                        # LLM sent plain string instead of dict
+                        keystrokes = cmd
+                        duration = 1.0
+                    else:
+                        keystrokes = cmd.get("keystrokes", "")
+                        duration = cmd.get("duration", 1.0)
                     commands.append(
                         Command(
                             keystrokes=keystrokes,

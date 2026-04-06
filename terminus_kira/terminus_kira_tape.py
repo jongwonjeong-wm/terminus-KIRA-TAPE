@@ -84,6 +84,8 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_replan_count: int = 0
         self._tape_terminal_history: str = ""  # unused, kept for compat
         self._tape_subgoal_injected: bool = False  # whether subgoal was already injected for current step
+        self._tape_recent_outputs: list[str] = []  # last N terminal outputs for judge context
+        self._tape_double_conf_count: int = 0  # consecutive double-confirmation failures
 
     @staticmethod
     def name() -> str:
@@ -647,9 +649,15 @@ class TerminusKiraTAPE(TerminusKira):
 
             # Handle task completion
             if is_task_complete and was_pending_completion:
+                self._tape_double_conf_count = 0
                 return episode + 1
 
             if is_task_complete:
+                # If agent already failed double-confirmation once, accept immediately
+                if self._tape_double_conf_count >= 1:
+                    logger.info("[TAPE] Agent retried task_complete after prior decline, accepting")
+                    self._tape_double_conf_count = 0
+                    return episode + 1
                 # First confirmation sent — don't advance path, wait for re-confirm
                 self._tape_subgoal_injected = True  # suppress re-injection on next episode
                 prompt = observation
@@ -657,10 +665,21 @@ class TerminusKiraTAPE(TerminusKira):
                 continue
 
             if was_pending_completion and not is_task_complete:
-                # Agent backed out of task_complete — task isn't done, replan
+                # Agent backed out of task_complete — replan with context
+                self._tape_double_conf_count += 1
                 logger.info(
-                    "[TAPE] Agent declined double-confirmation, replanning..."
+                    "[TAPE] Agent declined double-confirmation (#%d), replanning with context",
+                    self._tape_double_conf_count,
                 )
+                self._pending_completion = False  # reset before replan
+                # Add context about why we're replanning
+                replan_context = (
+                    "The agent attempted to mark the task as complete but then "
+                    "determined it is NOT ready. The agent's latest response "
+                    "indicates remaining work is needed. "
+                    "Plan what additional steps are required to finish the task."
+                )
+                observation = f"{observation}\n\n[REPLAN CONTEXT] {replan_context}"
                 selected_path, episode = await self._handle_replan(
                     selected_path, current_subgoal,
                     terminal_output, observation,
@@ -672,7 +691,7 @@ class TerminusKiraTAPE(TerminusKira):
                 episode += 1
                 continue
 
-            # --- STEP JUDGMENT: ADVANCE or REPLAN ---
+            # --- STEP JUDGMENT: COMPLETE / IN_PROGRESS / REPLAN ---
             if self._tape_mismatch_checker is not None:
                 status = await self._tape_mismatch_checker.check(
                     terminal_history="",
@@ -680,9 +699,16 @@ class TerminusKiraTAPE(TerminusKira):
                     subgoal_description=current_subgoal.description,
                     predicted_state=current_subgoal.predicted_state,
                     task_instruction=original_instruction,
+                    agent_analysis=analysis,
+                    agent_plan=plan,
+                    recent_outputs=self._tape_recent_outputs[-2:],
                 )
+                # Track recent outputs (keep last 2)
+                self._tape_recent_outputs.append(terminal_output)
+                if len(self._tape_recent_outputs) > 2:
+                    self._tape_recent_outputs.pop(0)
 
-                if status == SubgoalStatus.COMPLETED_MISMATCH:
+                if status == SubgoalStatus.REPLAN:
                     # REPLAN — state diverged
                     logger.info(
                         "[TAPE] REPLAN at step %d/%d (replan #%d): %s",
@@ -706,13 +732,29 @@ class TerminusKiraTAPE(TerminusKira):
                     episode += 1
                     continue
 
-            # ADVANCE — move to next subgoal (default)
+                if status == SubgoalStatus.IN_PROGRESS:
+                    # IN_PROGRESS — stay on same subgoal
+                    self._dump_tape_judgment(
+                        logging_dir, episode, current_subgoal.description,
+                        "in_progress", terminal_output,
+                    )
+                    logger.info(
+                        "[TAPE] IN_PROGRESS step %d/%d: %s",
+                        selected_path.current_step_idx + 1,
+                        selected_path.total_steps,
+                        current_subgoal.description,
+                    )
+                    prompt = observation
+                    episode += 1
+                    continue
+
+            # COMPLETE — subgoal achieved, move to next subgoal
             self._dump_tape_judgment(
                 logging_dir, episode, current_subgoal.description,
-                "advance", terminal_output,
+                "complete", terminal_output,
             )
             logger.info(
-                "[TAPE] ADVANCE step %d/%d: %s",
+                "[TAPE] COMPLETE step %d/%d: %s",
                 selected_path.current_step_idx + 1,
                 selected_path.total_steps,
                 current_subgoal.description,

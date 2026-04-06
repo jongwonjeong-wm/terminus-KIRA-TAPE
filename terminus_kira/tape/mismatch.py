@@ -1,7 +1,8 @@
 """MismatchChecker — single-stage step judgment via LLM tool calling.
 
-After each agent turn, judges whether to ADVANCE (next subgoal)
-or REPLAN (state diverged). Binary decision — no CONTINUE state.
+After each agent turn, judges whether to COMPLETE (subgoal achieved,
+move to next), IN_PROGRESS (keep working on same subgoal), or
+REPLAN (state diverged, need new plan).
 """
 
 import json
@@ -41,9 +42,10 @@ STEP_JUDGE_TOOLS = [
                 "properties": {
                     "decision": {
                         "type": "string",
-                        "enum": ["advance", "replan"],
+                        "enum": ["complete", "in_progress", "replan"],
                         "description": (
-                            "advance: subgoal done, move to next. "
+                            "complete: subgoal achieved, move to next. "
+                            "in_progress: agent is working toward the subgoal but has not achieved it yet. "
                             "replan: state diverged, need new plan."
                         ),
                     },
@@ -62,12 +64,13 @@ STEP_JUDGE_TOOLS = [
 class SubgoalStatus:
     """Result of step judgment."""
 
-    COMPLETED_MATCH = "completed_match"       # ADVANCE — done, proceed
-    COMPLETED_MISMATCH = "completed_mismatch"  # REPLAN — state diverged
+    COMPLETE = "complete"            # Subgoal achieved, move to next
+    IN_PROGRESS = "in_progress"      # Working toward subgoal, stay on it
+    REPLAN = "replan"                # State diverged, need new plan
 
 
 class MismatchChecker:
-    """Single-stage step judge: decides ADVANCE / REPLAN after each turn."""
+    """Single-stage step judge: decides COMPLETE / IN_PROGRESS / REPLAN after each turn."""
 
     def __init__(
         self,
@@ -121,22 +124,38 @@ class MismatchChecker:
         subgoal_description: str,
         predicted_state: str,
         task_instruction: str,
+        agent_analysis: str = "",
+        agent_plan: str = "",
+        recent_outputs: list[str] | None = None,
     ) -> str:
         """Single-call step judgment.
 
         Returns one of:
-            SubgoalStatus.COMPLETED_MATCH — ADVANCE, proceed to next subgoal
-            SubgoalStatus.COMPLETED_MISMATCH — REPLAN, state diverged
+            SubgoalStatus.COMPLETE — subgoal achieved, proceed to next
+            SubgoalStatus.IN_PROGRESS — still working, stay on subgoal
+            SubgoalStatus.REPLAN — state diverged, need new plan
         """
         if len(current_terminal_output) > 3000:
             current_terminal_output = current_terminal_output[-3000:]
+
+        # Build recent context from previous episodes
+        recent_context = ""
+        if recent_outputs:
+            for i, output in enumerate(recent_outputs):
+                truncated = output[-1500:] if len(output) > 1500 else output
+                recent_context += f"[Turn -{len(recent_outputs)-i}]\n{truncated}\n\n"
 
         user_parts = [
             f"# Task\n{task_instruction}",
             f"# Current Subgoal\n{subgoal_description}",
             f"# Predicted State (from simulation)\n{predicted_state or '(none)'}",
-            f"# Terminal Output (this turn)\n{current_terminal_output}",
+            f"# Agent's Intent\n"
+            f"Analysis: {agent_analysis or '(none)'}\n"
+            f"Plan: {agent_plan or '(none)'}",
         ]
+        if recent_context:
+            user_parts.append(f"# Previous Turns\n{recent_context}")
+        user_parts.append(f"# Current Terminal Output\n{current_terminal_output}")
         user_message = "\n\n".join(user_parts)
 
         messages = add_anthropic_caching(
@@ -150,19 +169,22 @@ class MismatchChecker:
         try:
             result = await self._call_llm(messages)
         except Exception as e:
-            logger.warning("[TAPE Judge] LLM call failed: %s — defaulting to ADVANCE", e)
-            return SubgoalStatus.COMPLETED_MATCH
+            logger.warning("[TAPE Judge] LLM call failed: %s — defaulting to IN_PROGRESS", e)
+            return SubgoalStatus.IN_PROGRESS
 
         if result is None:
-            logger.warning("[TAPE Judge] No tool call returned — defaulting to ADVANCE")
-            return SubgoalStatus.COMPLETED_MATCH
+            logger.warning("[TAPE Judge] No tool call returned — defaulting to IN_PROGRESS")
+            return SubgoalStatus.IN_PROGRESS
 
-        decision = result.get("decision", "advance")
+        decision = result.get("decision", "in_progress")
         reason = result.get("reason", "")
 
-        if decision == "replan":
+        if decision == "complete":
+            logger.info("[TAPE Judge] COMPLETE: %s", reason)
+            return SubgoalStatus.COMPLETE
+        elif decision == "replan":
             logger.info("[TAPE Judge] REPLAN: %s", reason)
-            return SubgoalStatus.COMPLETED_MISMATCH
+            return SubgoalStatus.REPLAN
         else:
-            logger.info("[TAPE Judge] ADVANCE: %s", reason)
-            return SubgoalStatus.COMPLETED_MATCH
+            logger.info("[TAPE Judge] IN_PROGRESS: %s", reason)
+            return SubgoalStatus.IN_PROGRESS
