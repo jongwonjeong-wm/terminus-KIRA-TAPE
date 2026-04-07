@@ -13,7 +13,6 @@ through the conversation context.
 import asyncio
 import json
 import logging
-import math
 from pathlib import Path
 
 import litellm
@@ -52,21 +51,15 @@ _PREDICTED_STATE_DESC = (
     "instead of simulating the actual gcc output."
 )
 
-_SUCCESS_PROBABILITY_DESC = (
-    "How likely this step succeeds (0.0-1.0). "
-    "Consider common failure modes: file not found, permission denied, "
-    "compilation errors, syntax errors, wrong paths, missing dependencies."
+_ESTIMATED_DURATION_DESC = (
+    "Estimated wall-clock seconds for the entire subgoal. "
+    "Sum up all commands the agent would run for this subgoal."
 )
 
-_ESTIMATED_DURATION_DESC = (
-    "Estimated wall-clock seconds for execution. "
-    "On immediate tasks (e.g., cd, ls, echo, cat) set a duration of 0.1 seconds. "
-    "On commands (e.g., gcc, find, rustc) set a duration of 1.0 seconds. "
-    "On slow commands (e.g., make, python3 [long running script], wget [file]) "
-    "set an appropriate duration as you determine necessary. "
-    "It is better to set a smaller duration than a longer duration. "
-    "Never wait longer than 60 seconds; prefer to poll to see intermediate result status. "
-    "Sum up all commands the agent would run for this subgoal."
+_REWARD_DESC = (
+    "1 if this step results in successful task completion (goal state). "
+    "0 for normal intermediate steps. "
+    "Between -1 and 0 if this step is likely to fail — closer to -1 for higher risk."
 )
 
 # Tool definition for a single step simulation
@@ -83,16 +76,16 @@ SIMULATOR_STEP_TOOLS = [
                         "type": "string",
                         "description": _PREDICTED_STATE_DESC,
                     },
-                    "success_probability": {
-                        "type": "number",
-                        "description": _SUCCESS_PROBABILITY_DESC,
-                    },
                     "estimated_duration": {
                         "type": "number",
                         "description": _ESTIMATED_DURATION_DESC,
                     },
+                    "reward": {
+                        "type": "number",
+                        "description": _REWARD_DESC,
+                    },
                 },
-                "required": ["predicted_state", "success_probability", "estimated_duration"],
+                "required": ["predicted_state", "estimated_duration", "reward"],
             },
         },
     },
@@ -245,8 +238,8 @@ class TAPESimulator:
 
             if result is not None and assistant_msg is not None:
                 sg.predicted_state = result.get("predicted_state", "")
-                sg.success_probability = float(result.get("success_probability", 0.5))
                 sg.estimated_duration = float(result.get("estimated_duration", 1.0))
+                sg.reward = float(result.get("reward", 0.0))
 
                 # Append assistant response + tool result to conversation
                 messages.append(assistant_msg)
@@ -258,7 +251,6 @@ class TAPESimulator:
                 })
             else:
                 sg.predicted_state = f"(simulation failed for step {i})"
-                sg.success_probability = 0.5
                 sg.estimated_duration = 1.0
                 # Add a placeholder so conversation can continue
                 messages.append({
@@ -266,16 +258,13 @@ class TAPESimulator:
                     "content": f"Step {i} simulation failed, continuing with next step.",
                 })
 
-        plan.total_success_prob = math.prod(
-            sg.success_probability for sg in plan.subgoals
-        )
         plan.total_estimated_duration = sum(
             sg.estimated_duration for sg in plan.subgoals
         )
 
         logger.info(
-            "[TAPE Simulator] Plan %d: success_prob=%.3f, duration=%.1fs",
-            plan.plan_id, plan.total_success_prob, plan.total_estimated_duration,
+            "[TAPE Simulator] Plan %d: duration=%.1fs",
+            plan.plan_id, plan.total_estimated_duration,
         )
         return plan
 

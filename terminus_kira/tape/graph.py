@@ -303,7 +303,7 @@ class PlanGraphBuilder:
                         from_node=prev_node_id,
                         to_node=target_node_id,
                         subgoal=subgoal,
-                        reward=subgoal.success_probability,
+                        reward=subgoal.reward,
                         cost=subgoal.estimated_duration,
                     )
 

@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,6 +85,7 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_replan_count: int = 0
         self._tape_terminal_history: str = ""  # unused, kept for compat
         self._tape_subgoal_injected: bool = False  # whether subgoal was already injected for current step
+        self._tape_subgoal_start_time: float | None = None  # wall-clock start of current subgoal
         self._tape_recent_outputs: list[str] = []  # last N terminal outputs for judge context
         self._tape_double_conf_count: int = 0  # consecutive double-confirmation failures
 
@@ -245,7 +247,7 @@ class TerminusKiraTAPE(TerminusKira):
 
         if selected is None:
             logger.warning("[TAPE] ILP infeasible, falling back to best single plan")
-            best_plan = max(simulated_plans, key=lambda p: p.total_success_prob)
+            best_plan = max(simulated_plans, key=lambda p: sum(sg.reward for sg in p.subgoals))
             selected = self._plan_to_path(best_plan)
 
         logger.info(
@@ -278,13 +280,13 @@ class TerminusKiraTAPE(TerminusKira):
                     from_node=from_node,
                     to_node=to_node,
                     subgoal=sg,
-                    reward=sg.success_probability,
+                    reward=sg.reward,
                     cost=sg.estimated_duration,
                 )
             )
         return SelectedPath(
             edges=edges,
-            total_reward=plan.total_success_prob,
+            total_reward=sum(sg.reward for sg in plan.subgoals),
             total_cost=plan.total_estimated_duration,
         )
 
@@ -511,6 +513,7 @@ class TerminusKiraTAPE(TerminusKira):
                 # 3. Modify tool descriptions
                 self._tape_tools = self._inject_subgoal_into_tools(current_subgoal)
                 self._tape_subgoal_injected = True
+                self._tape_subgoal_start_time = time.monotonic()
             else:
                 # IN_PROGRESS continuation — no tool_choice forcing
                 constrained_prompt = prompt
@@ -709,7 +712,10 @@ class TerminusKiraTAPE(TerminusKira):
                     self._tape_recent_outputs.pop(0)
 
                 if status == SubgoalStatus.REPLAN:
-                    # REPLAN — state diverged
+                    # REPLAN — state diverged; record elapsed time on current subgoal
+                    if self._tape_subgoal_start_time is not None:
+                        current_subgoal.actual_duration = time.monotonic() - self._tape_subgoal_start_time
+                        self._tape_subgoal_start_time = None
                     logger.info(
                         "[TAPE] REPLAN at step %d/%d (replan #%d): %s",
                         selected_path.current_step_idx + 1,
@@ -749,15 +755,20 @@ class TerminusKiraTAPE(TerminusKira):
                     continue
 
             # COMPLETE — subgoal achieved, move to next subgoal
+            if self._tape_subgoal_start_time is not None:
+                current_subgoal.actual_duration = time.monotonic() - self._tape_subgoal_start_time
+                self._tape_subgoal_start_time = None
             self._dump_tape_judgment(
                 logging_dir, episode, current_subgoal.description,
                 "complete", terminal_output,
             )
             logger.info(
-                "[TAPE] COMPLETE step %d/%d: %s",
+                "[TAPE] COMPLETE step %d/%d: %s (predicted=%.1fs, actual=%.1fs)",
                 selected_path.current_step_idx + 1,
                 selected_path.total_steps,
                 current_subgoal.description,
+                current_subgoal.estimated_duration,
+                current_subgoal.actual_duration or 0.0,
             )
             selected_path.current_step_idx += 1
             self._tape_subgoal_injected = False
@@ -907,14 +918,26 @@ class TerminusKiraTAPE(TerminusKira):
                 )
             return None, episode
 
+        # Build calibration context from executed subgoals (predicted vs actual duration)
+        calibration_lines = []
+        for edge in selected_path.edges[:selected_path.current_step_idx + 1]:
+            sg = edge.subgoal
+            if sg.actual_duration is not None:
+                calibration_lines.append(
+                    f"- \"{sg.description}\": predicted {sg.estimated_duration:.1f}s, actual {sg.actual_duration:.1f}s"
+                )
+
+        history_parts = [f"Previous plan failed at step: {current_subgoal.description}."]
+        if calibration_lines:
+            history_parts.append(
+                "Execution time calibration from completed steps:\n" + "\n".join(calibration_lines)
+            )
+
         logger.info("[TAPE] Replanning...")
         new_path = await self._tape_plan_and_select(
             original_instruction,
             terminal_output,
-            chat_history_summary=(
-                f"Previous plan failed at step: "
-                f"{current_subgoal.description}."
-            ),
+            chat_history_summary="\n".join(history_parts),
             chat=chat,
             logging_dir=logging_dir,
         )
@@ -932,6 +955,7 @@ class TerminusKiraTAPE(TerminusKira):
 
         self._tape_terminal_history = ""  # reset for new plan
         self._tape_subgoal_injected = False  # reset for new plan
+        self._tape_subgoal_start_time = None  # reset for new plan
         return new_path, episode
 
     async def _run_vanilla_remaining(
@@ -992,7 +1016,6 @@ class TerminusKiraTAPE(TerminusKira):
         for p in simulated_plans:
             sim_data.append({
                 "plan_id": p.plan_id,
-                "total_success_prob": p.total_success_prob,
                 "total_estimated_duration": p.total_estimated_duration,
                 "subgoals": [
                     {
@@ -1000,7 +1023,7 @@ class TerminusKiraTAPE(TerminusKira):
                         "description": sg.description,
                         "predicted_tool": sg.predicted_tool.value,
                         "predicted_state": sg.predicted_state,
-                        "success_probability": sg.success_probability,
+                        "reward": sg.reward,
                         "estimated_duration": sg.estimated_duration,
                     }
                     for sg in p.subgoals

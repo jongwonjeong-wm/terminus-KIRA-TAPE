@@ -144,6 +144,7 @@ class TAPEPlanner:
         task_instruction: str,
         current_terminal_state: str,
         chat_history_summary: str,
+        diverse: bool = False,
     ) -> Plan | None:
         """Generate a single candidate plan."""
         user_parts = [f"# Task\n{task_instruction}"]
@@ -152,6 +153,13 @@ class TAPEPlanner:
             user_parts.append(f"# Interaction History\n{chat_history_summary}")
 
         user_parts.append(f"# Current Terminal State\n{current_terminal_state or '(empty)'}")
+
+        if diverse:
+            user_parts.append(
+                "# Note\n"
+                "Generate a plan that takes a DIFFERENT approach from the most obvious one. "
+                "Consider alternative methods, different orderings, or different strategies."
+            )
 
         user_message = "\n\n".join(user_parts)
 
@@ -200,8 +208,8 @@ class TAPEPlanner:
     ) -> list[Plan]:
         """Generate M candidate plans concurrently.
 
-        Diversity comes from temperature-based sampling (temperature=0.8),
-        not from explicit style hints. This follows the TAPE paper approach.
+        First half: standard plans (temperature-based diversity only).
+        Second half: diverse plans (explicitly prompted for alternative approaches).
         """
         tasks = [
             self._generate_single_plan(
@@ -209,6 +217,7 @@ class TAPEPlanner:
                 task_instruction=task_instruction,
                 current_terminal_state=current_terminal_state,
                 chat_history_summary=chat_history_summary,
+                diverse=(i >= self.M // 2),
             )
             for i in range(self.M)
         ]

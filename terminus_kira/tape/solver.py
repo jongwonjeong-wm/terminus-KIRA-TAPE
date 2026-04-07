@@ -2,6 +2,9 @@
 
 Implements the time-expanded ILP formulation from the TAPE paper (Section 3.2),
 adapted for the plan graph structure used in Terminus-Kira.
+
+Objective: maximize Σ log(p_e) * x_e  (= maximize path success probability)
+           with small cost penalty λ for tie-breaking (prefer faster paths).
 """
 
 import logging
@@ -26,7 +29,8 @@ class ILPSolver:
 
     Formulation:
         Variables: x_e in {0, 1} for each edge e
-        Objective: maximize sum_e (reward_e * x_e)
+        Objective: maximize sum_e (log(p_e) - λ * cost_e) * x_e
+                   where p_e = subgoal success probability (from simulator)
         Constraints:
             1. Flow out of start = 1
             2. Flow into virtual sink = 1
@@ -38,9 +42,11 @@ class ILPSolver:
     def __init__(
         self,
         time_budget: float | None = None,
+        cost_penalty: float = 0.001,
         solver_timeout: int = 10,
     ):
         self.time_budget = time_budget
+        self.cost_penalty = cost_penalty
         self.solver_timeout = solver_timeout
 
     def solve(self, graph: PlanGraphData) -> SelectedPath | None:
@@ -92,9 +98,11 @@ class ILPSolver:
             for eid in all_edges
         }
 
-        # Objective: maximize total reward
+        # Objective: maximize total reward with cost penalty
+        # reward: 1=goal, 0=normal, negative=risky (from simulator)
+        # -λ * cost: prefer faster paths as tie-breaker
         prob += lpSum(
-            all_edges[eid].reward * x[eid]
+            (all_edges[eid].reward - self.cost_penalty * all_edges[eid].cost) * x[eid]
             for eid in all_edges
         ), "TotalReward"
 
