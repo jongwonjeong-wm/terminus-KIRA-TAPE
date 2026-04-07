@@ -113,13 +113,14 @@
 <p>
   We adapt two modules from TAPE <a href="#ref-tape">[Jeong et al., 2026]</a> &mdash;
   <b>solver-integrated planning</b> and <b>state mismatch detection with replanning</b> &mdash;
-  as an outer wrapper on top of Terminus-KIRA to complement its planning ability.
+  as an outer wrapper on top of Terminus-KIRA <a href="#ref-tape">[KRAFTON AI &amp; Ludo Robotics, 2026]</a> to complement its planning ability.
   TAPE decomposes LLM agent failures into <em>sampling errors</em> and <em>planning errors</em>,
   and proposes corresponding modules to address each.
   In Terminal-Bench tasks, models at the Haiku tier and above exhibit negligible sampling errors,
   and Terminus-KIRA already enforces structured outputs via native tool calling;
   we therefore focus solely on the planning-side modules.
   The resulting architecture is shown in Figure 1.
+  Our implementation is available at <a href="https://github.com/jongwonjeong-wm/terminus-KIRA-TAPE">https://github.com/jongwonjeong-wm/terminus-KIRA-TAPE</a>.
 </p>
 
 <p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Figure 1. Agent Architecture: Base Agent (Terminus-KIRA) + TAPE</p>
@@ -854,6 +855,12 @@
   Jongwon Jeong, Jungtaek Kim, and Kangwook Lee.
   &ldquo;TAPE: Tool-Guided Adaptive Planning and Constrained Execution in Language Model Agents.&rdquo;
   <i>arXiv preprint arXiv:2602.19633</i>, 2026.
+</p>
+<p style="font-size:0.82rem;">
+  KRAFTON AI and Ludo Robotics.
+  &ldquo;Terminus-KIRA: Boosting Frontier Model Performance on Terminal-Bench with Minimal Harness.&rdquo;
+  2026.
+  <a href="https://github.com/krafton-ai/kira">https://github.com/krafton-ai/kira</a>.
 </p>
 
 <hr class="divider">
