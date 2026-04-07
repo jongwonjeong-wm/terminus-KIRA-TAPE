@@ -17,7 +17,7 @@ class Subgoal:
     """A single step in a high-level plan.
 
     Represents an edge (action) in the plan graph: tool + subgoal description.
-    The predicted_state, success_probability, and estimated_duration are
+    The predicted_state, estimated_duration, and reward are
     populated by the Simulator after initial plan generation.
     """
 
@@ -27,8 +27,11 @@ class Subgoal:
 
     # Populated by Simulator
     predicted_state: str = ""  # what terminal should look like after
-    success_probability: float = 0.0  # 0.0–1.0
     estimated_duration: float = 1.0  # seconds (cost for ILP)
+    reward: float = 0.0  # 1=goal success, 0=normal, negative=risky
+
+    # Populated during execution (for replanning calibration)
+    actual_duration: float | None = None  # wall-clock seconds actually taken
 
 
 @dataclass
@@ -37,7 +40,6 @@ class Plan:
 
     plan_id: int
     subgoals: list[Subgoal] = field(default_factory=list)
-    total_success_prob: float = 0.0  # product of step probs
     total_estimated_duration: float = 0.0  # sum of step durations
 
 
@@ -59,7 +61,7 @@ class PlanEdge:
     from_node: str  # node_id
     to_node: str  # node_id
     subgoal: Subgoal
-    reward: float  # success_probability
+    reward: float  # 1=goal, 0=normal, negative=risky
     cost: float  # estimated_duration
 
 

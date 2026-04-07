@@ -86,6 +86,7 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_terminal_history: str = ""  # unused, kept for compat
         self._tape_subgoal_injected: bool = False  # whether subgoal was already injected for current step
         self._tape_subgoal_start_time: float | None = None  # wall-clock start of current subgoal
+        self._tape_consecutive_in_progress: int = 0  # consecutive IN_PROGRESS count for current subgoal
         self._tape_recent_outputs: list[str] = []  # last N terminal outputs for judge context
         self._tape_double_conf_count: int = 0  # consecutive double-confirmation failures
 
@@ -740,21 +741,33 @@ class TerminusKiraTAPE(TerminusKira):
 
                 if status == SubgoalStatus.IN_PROGRESS:
                     # IN_PROGRESS — stay on same subgoal
+                    self._tape_consecutive_in_progress += 1
                     self._dump_tape_judgment(
                         logging_dir, episode, current_subgoal.description,
                         "in_progress", terminal_output,
                     )
                     logger.info(
-                        "[TAPE] IN_PROGRESS step %d/%d: %s",
+                        "[TAPE] IN_PROGRESS step %d/%d (%d consecutive): %s",
                         selected_path.current_step_idx + 1,
                         selected_path.total_steps,
+                        self._tape_consecutive_in_progress,
                         current_subgoal.description,
                     )
-                    prompt = observation
+                    # After 2 consecutive IN_PROGRESS, compact the observation
+                    # to avoid context explosion from repetitive compilation logs
+                    if self._tape_consecutive_in_progress > 2:
+                        prompt = (
+                            f"[Still in progress: {current_subgoal.description}] "
+                            f"Waiting ({self._tape_consecutive_in_progress} checks). "
+                            f"Continue working on this subgoal."
+                        )
+                    else:
+                        prompt = observation
                     episode += 1
                     continue
 
             # COMPLETE — subgoal achieved, move to next subgoal
+            self._tape_consecutive_in_progress = 0
             if self._tape_subgoal_start_time is not None:
                 current_subgoal.actual_duration = time.monotonic() - self._tape_subgoal_start_time
                 self._tape_subgoal_start_time = None
@@ -956,6 +969,7 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_terminal_history = ""  # reset for new plan
         self._tape_subgoal_injected = False  # reset for new plan
         self._tape_subgoal_start_time = None  # reset for new plan
+        self._tape_consecutive_in_progress = 0  # reset for new plan
         return new_path, episode
 
     async def _run_vanilla_remaining(
