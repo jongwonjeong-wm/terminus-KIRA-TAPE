@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminus-KIRA + TAPE PoC Report</title>
+<style>
+  :root {
+    --fg: #111; --muted: #6b6b6b; --light: #a8a179;
+    --yellow: #FBD45B; --card: #F5F4EF; --card-alt: #EEECE4;
+    --border: #C0BDAD; --border-light: #E6E0CB; --shadow: #C0BDAD;
+    --red: #c0392b; --green: #1a7a3a; --blue: #1a4a8a; --purple: #6a3d9a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: #fff; color: var(--fg);
+    max-width: 900px; margin: 0 auto;
+    padding: 48px 24px 80px; line-height: 1.7; font-size: 14px;
+  }
+  h1 {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 2rem; font-weight: 400; line-height: 1.2;
+    margin-bottom: 8px; letter-spacing: -0.5px;
+  }
+  h2 {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 1.25rem; font-weight: 400;
+    margin: 48px 0 16px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  h3 {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 1.05rem; font-weight: 400;
+    margin: 28px 0 10px;
+  }
+  p { margin: 8px 0; }
+  .sub {
+    font-family: 'SF Mono', 'Fira Mono', Consolas, monospace;
+    font-size: 0.78rem; color: var(--light); margin-bottom: 36px;
+  }
+  code {
+    font-family: 'SF Mono', 'Fira Mono', Consolas, monospace;
+    font-size: 0.82em; background: var(--card);
+    padding: 1px 5px; border-radius: 2px; border: 1px solid var(--border-light);
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    box-shadow: 3px 3px 0px var(--shadow); padding: 20px; margin: 16px 0;
+  }
+  .card-title { font-weight: 600; margin-bottom: 8px; }
+  .comparison-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.82rem; }
+  th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--fg); font-weight: 600; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border-light); }
+  .divider { border: none; border-top: 1px solid var(--border-light); margin: 40px 0; }
+  .callout {
+    background: var(--card); border: 1px solid var(--border);
+    padding: 14px 18px; margin: 16px 0; font-size: 0.85rem;
+    border-left: 3px solid var(--yellow);
+  }
+  ol, ul { margin: 8px 0 8px 24px; }
+  li { margin: 4px 0; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 3px;
+    font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .tag-green  { background: #e8f5e9; color: var(--green); }
+  .tag-yellow { background: #fff8e1; color: #b8860b; }
+  .tag-red    { background: #fce4ec; color: var(--red); }
+  .tag-purple { background: #f3e5f5; color: var(--purple); }
+  .muted { color: var(--muted); }
+  .pipeline-flow {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin: 12px 0; font-size: 0.82rem;
+  }
+  .pipeline-step {
+    background: var(--card); border: 1px solid var(--border);
+    padding: 4px 10px; font-weight: 600; font-size: 0.78rem;
+  }
+  .pipeline-arrow { color: var(--muted); }
+  .result-placeholder {
+    background: var(--card-alt); border: 2px dashed var(--border);
+    padding: 24px; text-align: center; color: var(--muted);
+    font-style: italic; margin: 16px 0; font-size: 0.85rem;
+  }
+  .hl { background: var(--yellow); padding: 0 3px; }
+  /* Architecture diagram */
+  .arch-diagram {
+    position: relative; margin: 24px 0; padding: 0;
+    font-family: 'SF Mono', 'Fira Mono', Consolas, monospace;
+    font-size: 0.72rem;
+  }
+  .arch-diagram svg { width: 100%; height: auto; }
+</style>
+</head>
+<body>
+
+<h1>Terminus-KIRA + TAPE <span style="color:var(--muted);font-size:0.6em;">PoC Report</span></h1>
+<p class="sub">Terminal-Bench 2.0 &middot; Jongwon Jeong &middot; April 2026</p>
+
+<div class="callout">
+  <b>TL;DR:</b> We integrated TAPE on top of Terminus-KIRA.
+  On a selected subset of 10 Terminal-Bench 2.0 tasks, TAPE improves solve rate from 4/10 to 8/10
+  with no regressions, while reducing average cost and execution time.
+</div>
+
+<!-- ============================================================ -->
+<h2>1. Introduction</h2>
+<p>
+  We adapt two modules from TAPE <a href="#ref-tape">[Jeong et al., 2026]</a> &mdash;
+  <b>solver-integrated planning</b> and <b>state mismatch detection with replanning</b> &mdash;
+  as an outer wrapper on top of Terminus-KIRA to complement its planning ability.
+  TAPE decomposes LLM agent failures into <em>sampling errors</em> and <em>planning errors</em>,
+  and proposes corresponding modules to address each.
+  In Terminal-Bench tasks, models at the Haiku tier and above exhibit negligible sampling errors,
+  and Terminus-KIRA already enforces structured outputs via native tool calling;
+  we therefore focus solely on the planning-side modules.
+  The resulting architecture is shown in Figure 1.
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Figure 1. Agent Architecture: Base Agent (Terminus-KIRA) + TAPE</p>
+
+<div class="arch-diagram">
+<svg viewBox="0 0 880 470" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrowGray" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#C0BDAD"/></marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#6a3d9a"/></marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#1a7a3a"/></marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#1a4a8a"/></marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#c0392b"/></marker>
+    <marker id="arrowYellow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8" fill="#b8860b"/></marker>
+  </defs>
+
+  <!-- ========== ENVIRONMENT ========== -->
+  <rect x="10" y="10" width="860" height="450" rx="8" fill="#fafaf7" stroke="#C0BDAD" stroke-width="2"/>
+  <text x="30" y="36" font-family="Georgia, serif" font-size="14" font-weight="600" fill="#6b6b6b">Environment</text>
+
+  <!-- ========== TMUX TERMINAL (right column) ========== -->
+  <rect x="660" y="48" width="190" height="390" rx="6" fill="#1a1a2e" stroke="#C0BDAD" stroke-width="1.5"/>
+  <text x="710" y="74" font-family="SF Mono, Consolas, monospace" font-size="12" font-weight="600" fill="#7ec8e3">Tmux Session</text>
+  <rect x="676" y="86" width="158" height="24" rx="3" fill="#16213e"/>
+  <text x="684" y="102" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#a8a8a8">$ gcc -o main main.c</text>
+  <rect x="676" y="116" width="158" height="24" rx="3" fill="#16213e"/>
+  <text x="684" y="132" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#66bb6a">Build successful</text>
+  <rect x="676" y="146" width="158" height="24" rx="3" fill="#16213e"/>
+  <text x="684" y="162" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#a8a8a8">$ ./run_tests</text>
+
+  <!-- ========== TASK INSTRUCTION ========== -->
+  <text x="30" y="65" font-family="SF Mono, Consolas, monospace" font-size="10" fill="#6b6b6b">Task Instruction</text>
+  <line x1="100" y1="70" x2="100" y2="92" stroke="#C0BDAD" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+
+  <!-- ========== TAPE WRAPPER ========== -->
+  <rect x="30" y="88" width="610" height="340" rx="6" fill="none" stroke="#6a3d9a" stroke-width="2" stroke-dasharray="6,3"/>
+  <rect x="34" y="81" width="120" height="18" rx="3" fill="#f3e5f5"/>
+  <text x="42" y="93" font-family="SF Mono, Consolas, monospace" font-size="10" font-weight="700" fill="#6a3d9a">TAPE Framework</text>
+
+  <!-- ========== PLANNING PHASE ========== -->
+  <rect x="50" y="120" width="520" height="58" rx="5" fill="#f9f5ff" stroke="#6a3d9a" stroke-width="1"/>
+  <rect x="54" y="113" width="300" height="16" rx="3" fill="#ede7f6"/>
+  <text x="60" y="124" font-family="SF Mono, Consolas, monospace" font-size="9" font-weight="700" fill="#6a3d9a">Planning: Graph Construction + External Solver</text>
+
+  <!-- Pipeline boxes (centered in 520px planning box) -->
+  <rect x="86" y="136" width="82" height="32" rx="3" fill="#fff" stroke="#6a3d9a" stroke-width="1"/>
+  <text x="127" y="147" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#4a148c" text-anchor="middle">Planner</text>
+  <text x="127" y="157" font-family="SF Mono, Consolas, monospace" font-size="6.5" fill="#6a3d9a" text-anchor="middle">M plans</text>
+  <text x="127" y="165" font-family="SF Mono, Consolas, monospace" font-size="7" fill="#6a3d9a" text-anchor="middle">(LLM)</text>
+
+  <line x1="168" y1="152" x2="181" y2="152" stroke="#6a3d9a" stroke-width="1.2" marker-end="url(#arrowPurple)"/>
+
+  <rect x="183" y="136" width="82" height="32" rx="3" fill="#fff" stroke="#6a3d9a" stroke-width="1"/>
+  <text x="224" y="149" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#4a148c" text-anchor="middle">Simulator</text>
+  <text x="224" y="161" font-family="SF Mono, Consolas, monospace" font-size="7" fill="#6a3d9a" text-anchor="middle">(LLM)</text>
+
+  <line x1="265" y1="152" x2="278" y2="152" stroke="#6a3d9a" stroke-width="1.2" marker-end="url(#arrowPurple)"/>
+
+  <rect x="280" y="136" width="82" height="32" rx="3" fill="#fff" stroke="#6a3d9a" stroke-width="1"/>
+  <text x="321" y="149" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#4a148c" text-anchor="middle">Graph Builder</text>
+  <text x="321" y="161" font-family="SF Mono, Consolas, monospace" font-size="7" fill="#6a3d9a" text-anchor="middle">(LLM)</text>
+
+  <line x1="362" y1="152" x2="375" y2="152" stroke="#6a3d9a" stroke-width="1.2" marker-end="url(#arrowPurple)"/>
+
+  <rect x="377" y="136" width="82" height="32" rx="3" fill="#fff" stroke="#6a3d9a" stroke-width="1"/>
+  <text x="418" y="154" font-family="SF Mono, Consolas, monospace" font-size="9" fill="#4a148c" text-anchor="middle">ILP Solver</text>
+
+  <line x1="459" y1="152" x2="472" y2="152" stroke="#6a3d9a" stroke-width="1.2" marker-end="url(#arrowPurple)"/>
+
+  <!-- Selected Path badge -->
+  <rect x="474" y="140" width="60" height="24" rx="4" fill="#6a3d9a"/>
+  <text x="504" y="151" font-family="SF Mono, Consolas, monospace" font-size="7.5" font-weight="700" fill="#fff" text-anchor="middle">Selected</text>
+  <text x="504" y="160" font-family="SF Mono, Consolas, monospace" font-size="7.5" font-weight="700" fill="#fff" text-anchor="middle">Path</text>
+
+  <!-- Arrow: Selected Path → KIRA (down, left, down) -->
+  <path d="M 489 164 L 489 190 L 155 190 L 155 208" fill="none" stroke="#6a3d9a" stroke-width="1.8" marker-end="url(#arrowPurple)"/>
+  <text x="270" y="200" font-family="SF Mono, Consolas, monospace" font-size="8" fill="#6a3d9a">dispatch subgoal</text>
+
+  <!-- ========== KIRA BOX (compact, left, moved down) ========== -->
+  <rect x="50" y="216" width="240" height="142" rx="5" fill="#f5f9f5" stroke="#1a7a3a" stroke-width="2"/>
+  <rect x="54" y="209" width="230" height="16" rx="3" fill="#e8f5e9"/>
+  <text x="60" y="220" font-family="SF Mono, Consolas, monospace" font-size="9" font-weight="700" fill="#1a7a3a">Base Agent: Terminus-KIRA</text>
+
+  <!-- LLM box -->
+  <rect x="62" y="232" width="216" height="56" rx="4" fill="#fff" stroke="#1a7a3a" stroke-width="1"/>
+  <text x="75" y="250" font-family="Georgia, serif" font-size="11" font-weight="600" fill="#1a7a3a">LLM</text>
+  <text x="75" y="264" font-family="SF Mono, Consolas, monospace" font-size="8" fill="#555">Native Tool Calling</text>
+  <!-- Tool badges -->
+  <rect x="75" y="270" width="60" height="12" rx="3" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="0.5"/>
+  <text x="80" y="279" font-family="SF Mono, Consolas, monospace" font-size="6.5" fill="#1a7a3a">execute_cmd</text>
+  <rect x="140" y="270" width="60" height="12" rx="3" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="0.5"/>
+  <text x="144" y="279" font-family="SF Mono, Consolas, monospace" font-size="6.5" fill="#1a7a3a">task_complete</text>
+  <rect x="205" y="270" width="55" height="12" rx="3" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="0.5"/>
+  <text x="210" y="279" font-family="SF Mono, Consolas, monospace" font-size="6.5" fill="#1a7a3a">image_read</text>
+
+  <!-- Command Execution box -->
+  <rect x="62" y="310" width="216" height="32" rx="4" fill="#fff" stroke="#1a7a3a" stroke-width="1"/>
+  <text x="75" y="327" font-family="Georgia, serif" font-size="10" font-weight="600" fill="#1a7a3a">Command Execution</text>
+  <text x="75" y="338" font-family="SF Mono, Consolas, monospace" font-size="7.5" fill="#555">Marker-based polling</text>
+
+  <!-- Arrow: LLM → Cmd Exec -->
+  <line x1="170" y1="288" x2="170" y2="310" stroke="#1a7a3a" stroke-width="1.2" marker-end="url(#arrowGreen)"/>
+
+  <!-- ========== STATE MISMATCH CHECKER (right of KIRA, moved down) ========== -->
+  <rect x="320" y="222" width="250" height="112" rx="5" fill="#fff8e1" stroke="#b8860b" stroke-width="1.5"/>
+  <rect x="324" y="215" width="235" height="16" rx="3" fill="#fff8e1"/>
+  <text x="330" y="226" font-family="SF Mono, Consolas, monospace" font-size="9" font-weight="700" fill="#b8860b">Monitoring: State Mismatch Detection</text>
+
+  <!-- LLM box inside Checker -->
+  <rect x="332" y="238" width="226" height="40" rx="4" fill="#fff" stroke="#b8860b" stroke-width="1"/>
+  <text x="345" y="255" font-family="Georgia, serif" font-size="11" font-weight="600" fill="#b8860b">LLM</text>
+  <text x="345" y="268" font-family="SF Mono, Consolas, monospace" font-size="7.5" fill="#555">terminal state vs. predicted state</text>
+
+  <!-- Outcome badges -->
+  <rect x="335" y="288" width="62" height="18" rx="3" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="0.8"/>
+  <text x="341" y="300" font-family="SF Mono, Consolas, monospace" font-size="8" font-weight="700" fill="#1a7a3a">ADVANCE</text>
+
+  <rect x="405" y="288" width="70" height="18" rx="3" fill="#fff8e1" stroke="#b8860b" stroke-width="0.8"/>
+  <text x="409" y="300" font-family="SF Mono, Consolas, monospace" font-size="8" font-weight="700" fill="#b8860b">IN_PROGRESS</text>
+
+  <rect x="483" y="288" width="58" height="18" rx="3" fill="#fce4ec" stroke="#c0392b" stroke-width="0.8"/>
+  <text x="489" y="300" font-family="SF Mono, Consolas, monospace" font-size="8" font-weight="700" fill="#c0392b">REPLAN</text>
+
+  <!-- ========== KIRA ↔ TMUX ARROWS (below KIRA and Checker) ========== -->
+
+  <!-- Observation: Tmux → KIRA (upper path) -->
+  <path d="M 660 382 L 210 382 L 210 358" fill="none" stroke="#1a4a8a" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="390" y="392" font-family="SF Mono, Consolas, monospace" font-size="8" fill="#1a4a8a">terminal output (observation)</text>
+
+  <!-- Keystrokes: KIRA → Tmux (lower path) -->
+  <path d="M 130 358 L 130 409 L 660 409" fill="none" stroke="#1a7a3a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="390" y="405" font-family="SF Mono, Consolas, monospace" font-size="8" fill="#1a7a3a">keystrokes</text>
+
+  <!-- Branch: observation → up into Checker bottom -->
+  <path d="M 445 382 L 445 334" fill="none" stroke="#1a4a8a" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+  <!-- ========== CHECKER → KIRA ARROWS ========== -->
+
+  <!-- ADVANCE → Selected Path: left into gap, up, right below purple, up into Selected Path -->
+  <path d="M 335 297 L 305 297 L 305 210 L 514 210 L 514 164" fill="none" stroke="#1a7a3a" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowGreen)"/>
+  <text x="380" y="200" font-family="SF Mono, Consolas, monospace" font-size="8" fill="#1a7a3a">dispatch next subgoal</text>
+
+  <!-- IN_PROGRESS → KIRA: Checker left → KIRA right (dashed, slightly below) -->
+  <path d="M 440 306 L 440 320 L 290 320" fill="none" stroke="#b8860b" stroke-width="1.3" stroke-dasharray="5,3" marker-end="url(#arrowYellow)"/>
+
+  <!-- ========== REPLAN → TAPE PLANNING BOX (right edge loop) ========== -->
+  <path d="M 541 297 L 585 297 L 585 149 L 570 149" fill="none" stroke="#c0392b" stroke-width="1.8" stroke-dasharray="6,3" marker-end="url(#arrowRed)"/>
+  <text x="600" y="280" font-family="SF Mono, Consolas, monospace" font-size="8" font-weight="600" fill="#c0392b" transform="rotate(-90, 600, 280)">replan from current state</text>
+
+</svg>
+</div>
+
+
+<p>
+  Figure 1 shows the overall architecture.
+  The left side contains the TAPE planning pipeline (purple) and the base agent (green),
+  while the right side shows the tmux terminal where commands are executed.
+  The two cards below summarize each component, and the execution flow follows.
+</p>
+
+<div class="comparison-grid">
+  <div class="card">
+    <div class="card-title" style="color:var(--green);">Base Agent: Terminus-KIRA (green box in Figure 1)</div>
+    <p>Harness change from Terminus-2.</p>
+    <ul>
+      <li><b>Native tool calling</b> &mdash; replaces ICL JSON/XML parsing with structured tool use</li>
+      <li><b><code>image_read</code> tool</b> &mdash; new tool for visual analysis of files</li>
+      <li><b>Marker-based polling</b> &mdash; detects command completion early, saves wait time</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-title" style="color:var(--purple);">TAPE Modules (purple/yellow boxes in Figure 1)</div>
+    <p>Wraps Terminus-KIRA with <b>planning</b> and <b>monitoring</b> layers.</p>
+    <p style="margin:8px 0 4px;font-weight:600;color:var(--purple);">Planning</p>
+    <ul style="margin-top:0;">
+      <li><b>Planner</b> &mdash; generates M candidate plans from task description</li>
+      <li><b>Simulator</b> &mdash; predicts expected state for each subgoal</li>
+      <li><b>Graph Builder + ILP Solver</b> &mdash; builds dependency graph, selects optimal path</li>
+    </ul>
+    <p style="margin:8px 0 4px;font-weight:600;color:var(--purple);">Monitoring</p>
+    <ul style="margin-top:0;">
+      <li><b>State Mismatch Detection</b> &mdash; compares terminal state vs. predicted state, outputs: ADVANCE / IN_PROGRESS / REPLAN</li>
+    </ul>
+  </div>
+</div>
+
+<h3>Execution Flow</h3>
+<p>
+  The following describes the end-to-end execution flow, corresponding to the arrows in Figure 1.
+</p>
+<ol>
+  <li><b>Task arrives</b> &rarr; TAPE&rsquo;s planning pipeline (purple box in Figure 1) generates M candidate plans, simulates expected states, builds a dependency graph, and the ILP solver selects the optimal path</li>
+  <li><b>For each subgoal</b> in the selected path:
+    <ul>
+      <li>TAPE dispatches the subgoal to Terminus-KIRA (green box), injecting subgoal context + tool_choice forcing into the prompt (first step only)</li>
+      <li>Terminus-KIRA calls LLM &rarr; gets commands &rarr; executes via tmux (right column) &rarr; reads terminal output</li>
+      <li>TAPE&rsquo;s <b>State Mismatch Detection</b> (yellow box) compares terminal output against predicted state:
+        <ul>
+          <li><span style="color:var(--green);font-weight:600;">ADVANCE</span> &mdash; subgoal complete, dispatch next subgoal</li>
+          <li><span style="color:#b8860b;font-weight:600;">IN_PROGRESS</span> &mdash; continue same subgoal, no forcing</li>
+          <li><span style="color:var(--red);font-weight:600;">REPLAN</span> &mdash; state diverged, re-run full planning pipeline from current state</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+  <li><b>All subgoals complete</b> &rarr; task done</li>
+</ol>
+
+<h3>One Non-trivial Part: Double Confirmation (<code>task_complete</code>)</h3>
+<p>The base agent (Terminus-KIRA) has a built-in double confirmation for <code>task_complete</code>: the agent must call it twice consecutively to finish.</p>
+<ul>
+  <li><b>Base agent re-confirms</b> &mdash; task completes normally</li>
+  <li><b>Base agent backs out</b> (decides more work is needed) &mdash; <b>TAPE</b> triggers a REPLAN from current state</li>
+</ul>
+
+
+<!-- ============================================================ -->
+<h2>2. Experimental Setup</h2>
+<p>
+  We evaluate Terminus-KIRA vs. Terminus-KIRA + TAPE on a subset of 10 Terminal-Bench 2.0 tasks,
+  chosen to cover diverse domains and difficulty levels.
+</p>
+
+<h3>Task Subset Selection</h3>
+
+<p>
+  We clustered all 89 Terminal-Bench 2.0 tasks by <b>domain</b>, <b>planning complexity</b>,
+  and <b>base success rate</b> (Terminus-2.0 + Haiku), then selected 10 representative tasks
+  across 10 distinct domains. (See <a href="#appendix-clusters">Appendix A</a> for full cluster breakdown.)
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 1. Selected 10 Tasks</p>
+<table>
+  <thead>
+    <tr><th>Group</th><th>Task</th><th>Base</th><th>Domain</th><th>Complexity</th><th>Cluster (see <a href="#appendix-clusters">App. A</a>)</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="3"><span class="tag tag-green">100%</span></td>
+      <td><code>fix-git</code></td><td>100%</td><td>Git</td><td>Low</td>
+      <td>A. Simple ops</td>
+    </tr>
+    <tr>
+      <td><code>kv-store-grpc</code></td><td>100%</td><td>Networking</td><td>Medium</td>
+      <td>A. Simple ops</td>
+    </tr>
+    <tr>
+      <td><code>portfolio-optimization</code></td><td>100%</td><td>Math</td><td>Medium</td>
+      <td>A. Simple ops</td>
+    </tr>
+    <tr>
+      <td rowspan="5"><span class="tag tag-yellow">Partial</span></td>
+      <td><code>mcmc-sampling-stan</code></td><td>80%</td><td>Statistics</td><td>Medium</td>
+      <td>B. Config/setup</td>
+    </tr>
+    <tr>
+      <td><code>code-from-image</code></td><td>60%</td><td>Multimodal</td><td>Medium</td>
+      <td>C. Code analysis</td>
+    </tr>
+    <tr>
+      <td><code>compile-compcert</code></td><td>40%</td><td>Build</td><td>High</td>
+      <td>D. Complex multi-step</td>
+    </tr>
+    <tr>
+      <td><code>model-extraction-relu-logits</code></td><td>40%</td><td>ML/Security</td><td>Very High</td>
+      <td>D. Complex multi-step</td>
+    </tr>
+    <tr>
+      <td><code>git-multibranch</code></td><td>40%</td><td>Git/DevOps</td><td>High</td>
+      <td>D. Complex multi-step</td>
+    </tr>
+    <tr>
+      <td rowspan="2"><span class="tag tag-red">0%</span></td>
+      <td><code>sqlite-db-truncate</code></td><td>0%</td><td>Database</td><td>High</td>
+      <td>E-2. Data/DB</td>
+    </tr>
+    <tr>
+      <td><code>large-scale-text-editing</code></td><td>0%</td><td>Text</td><td>High</td>
+      <td>E-3. Text/parsing</td>
+    </tr>
+  </tbody>
+</table>
+
+
+
+<!-- ============================================================ -->
+<h3>Evaluation Setup</h3>
+<p>
+  We run each of the 10 tasks once per agent on <code>claude-haiku-4-5-20251001</code>,
+  comparing Terminus-KIRA (base) vs. Terminus-KIRA + TAPE on Terminal-Bench 2.0 (Runloop).
+  TAPE uses M=4 candidate plans with unlimited replans.
+  Single run is intentional &mdash; this PoC targets directional signal, not statistical significance;
+  we plan to scale to 5 runs on promising tasks.
+</p>
+
+<!-- ============================================================ -->
+<h2>3. Overall Results</h2>
+<p>
+  TAPE improves Terminus-KIRA across all key metrics: success rate doubles (4/10 &rarr; 8/10),
+  average API cost drops 28%, and average execution time drops 11% &mdash; with zero regressions.
+</p>
+
+<div class="callout">
+  <b>Summary:</b>
+  <ol>
+    <li><b>Task success rate doubles</b> &mdash; 4/10 &rarr; 8/10 (+4 new solves, 0 regressions)</li>
+    <li><b>Average API cost reduced 28%</b> &mdash; $1.51 &rarr; $1.09/task, fewer wasted episodes on complex tasks</li>
+    <li><b>Average execution time reduced 11%</b> &mdash; 12.6m &rarr; 11.2m, subgoal-guided execution avoids aimless exploration</li>
+  </ol>
+</div>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 2. Overall Results</p>
+<table>
+  <thead>
+    <tr><th>Metric</th><th>Terminus-KIRA</th><th>Terminus-KIRA + TAPE</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Tasks solved (out of 10)</td><td>4</td><td><b>8</b></td></tr>
+    <tr><td>100% group (3 tasks)</td><td>3 / 3</td><td>3 / 3</td></tr>
+    <tr><td>Partial group (5 tasks)</td><td>1 / 5</td><td><b>4 / 5</b></td></tr>
+    <tr><td>0% group (2 tasks)</td><td>0 / 2</td><td><b>1 / 2</b></td></tr>
+    <tr><td>Average API cost</td><td>$1.51</td><td><b>$1.09</b></td></tr>
+    <tr><td>Average execution time</td><td>12.6m</td><td><b>11.2m</b></td></tr>
+  </tbody>
+</table>
+
+<h2>4. Detailed Sample-wise Analysis</h2>
+<p>Qualitative analysis of individual task runs reveals the following findings.</p>
+<div class="callout">
+  <b>Findings:</b><br>
+  <span style="color:var(--green);font-weight:600;">(+) What TAPE solves:</span>
+  <ol style="margin-top:4px;margin-bottom:10px;">
+    <li><b>Subgoal planning before execution</b> cuts over-verification and aimless exploration (100%, Partial groups)</li>
+    <li><b>ILP solver path selection</b> avoids failure-prone execution orders (Partial group &mdash; <a href="#appendix-solver">Appendix B</a>)</li>
+    <li><b>Replanning</b> recovers from unexpected errors and converges on correct strategies (Partial, 0% groups)</li>
+  </ol>
+  <span style="color:var(--red);font-weight:600;">(&ndash;) What TAPE introduces:</span>
+  <ol start="4" style="margin-top:4px;margin-bottom:10px;">
+    <li><b>Planning overhead</b> adds ~2x cost on simple tasks (100% group)</li>
+  </ol>
+  <span style="color:var(--muted);font-weight:600;">What remains unsolved:</span>
+  <ol start="5" style="margin-top:4px;">
+    <li><b>Capability limits</b> (model-extraction, sqlite-db-truncate) remain unresolved regardless of planning ability</li>
+  </ol>
+</div>
+
+<h3>4.1 100% Group</h3>
+<p>
+  No regressions &mdash; TAPE solves all 3 tasks. Cost is ~2x higher on simple tasks
+  ($0.25 avg vs $0.52 avg), an acceptable tradeoff given the solve-rate gains elsewhere.
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 3. 100% Group Results</p>
+<table>
+  <thead>
+    <tr><th>Task</th><th>Base</th><th>Terminus-KIRA</th><th>Terminus-KIRA + TAPE</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>fix-git</code></td><td>100%</td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">29 calls &middot; 1.6m &middot; $0.09</span></td>
+      <td><span class="tag tag-green">O</span><br><span class="muted">38 calls &middot; 4.6m &middot; $0.26</span></td>
+      <td>Both succeed. TAPE ~3x more expensive.</td>
+    </tr>
+    <tr>
+      <td><code>kv-store-grpc</code></td><td>100%</td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">45 calls &middot; 2.7m &middot; $0.19</span></td>
+      <td><span class="tag tag-green">O</span><br><span class="muted">25 calls &middot; 2.8m &middot; $0.21</span></td>
+      <td>Both succeed. Comparable cost. TAPE fewer episodes.</td>
+    </tr>
+    <tr>
+      <td><code>portfolio-optimization</code></td><td>100%</td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">94 calls &middot; 6.9m &middot; $0.47</span></td>
+      <td><span class="tag tag-green">O</span><br><span class="muted">80 calls &middot; 11.7m &middot; $1.10</span></td>
+      <td>Both succeed. TAPE ~2x more expensive.</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  <span style="color:var(--green);font-weight:600;">(+)</span>
+  <b>Mismatch detection cuts unnecessary episodes:</b>
+  TAPE&rsquo;s subgoal planning before execution defines clear stopping criteria per step &mdash; the mismatch detection
+  moves the agent to the next subgoal on completion, preventing over-verification loops.
+  On kv-store-grpc (45 &rarr; 25 episodes), Terminus-KIRA spent episodes 26&ndash;44 on repetitive test cycles after a correct implementation;
+  on portfolio-optimization (94 &rarr; 80), it hit repeated 60s timeout cycles without clear progression.
+</p>
+<p>
+  <span style="color:var(--red);font-weight:600;">(&ndash;)</span>
+  <b>TAPE planning + replanning adds cost on simple tasks:</b>
+  TAPE&rsquo;s upfront planning (M=4 candidates &rarr; simulation &rarr; graph &rarr; ILP)
+  and per-episode mismatch detection LLM calls increase token usage.
+  Replans amplify this &mdash; fix-git had 1 replan (bash syntax error), portfolio-optimization had 2 &mdash;
+  each re-running the full pipeline. Negligible on complex tasks, but visible here.
+</p>
+
+<h3>4.2 Partial Group</h3>
+<p>
+  TAPE&rsquo;s planning reduces aimless exploration and replanning recovers from unexpected errors,
+  lifting solve rate from 1/5 to 4/5 while also lowering cost on shared successes.
+  The only shared failure (model-extraction) is a capability limit.
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 4. Partial Group Results</p>
+<table>
+  <thead>
+    <tr><th>Task</th><th>Base</th><th>Terminus-KIRA</th><th>Terminus-KIRA + TAPE</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>mcmc-sampling-stan</code></td><td>80%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">182 calls &middot; 14.3m &middot; $1.70</span></td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">170 calls &middot; 30m (timeout) &middot; $2.13</span></td>
+      <td>TAPE solved despite hitting timeout.</td>
+    </tr>
+    <tr>
+      <td><code>code-from-image</code></td><td>60%</td>
+      <td><span class="tag tag-green">O</span><br><span class="muted">447 calls &middot; 20m &middot; $2.99</span></td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">12 calls &middot; 1.6m &middot; $0.08</span></td>
+      <td>Both succeed. TAPE 37x cheaper.</td>
+    </tr>
+    <tr>
+      <td><code>compile-compcert</code></td><td>40%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">589 calls &middot; 40m &middot; $7.20</span></td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">192 calls &middot; 24.8m &middot; $4.26</span></td>
+      <td>TAPE solved with 3x fewer steps.</td>
+    </tr>
+    <tr>
+      <td><code>model-extraction</code></td><td>40%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">49 calls &middot; 5.5m &middot; $0.55</span></td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">22 calls &middot; 5m &middot; $0.61</span></td>
+      <td>Both fail. Capability limit.</td>
+    </tr>
+    <tr>
+      <td><code>git-multibranch</code></td><td>40%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">12 calls &middot; 15.8m (timeout) &middot; $0.05</span></td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">44 calls &middot; 6.3m &middot; $0.39</span></td>
+      <td>TAPE solved with 3 replans.</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  <span style="color:var(--green);font-weight:600;">(+)</span>
+  <b>Subgoal planning before execution prevents inefficient exploration:</b>
+  On code-from-image, Terminus-KIRA looped through 400+ verification steps after an already-correct solution ($2.99);
+  TAPE finished in 12 calls ($0.08) because subgoal planning before execution gave each step clear completion criteria.
+  On compile-compcert, Terminus-KIRA cycled through compilation strategies without progress (589 calls, timeout);
+  TAPE&rsquo;s structured checkpoints between build stages guided it to success in 192 calls.
+</p>
+<p>
+  <span style="color:var(--green);font-weight:600;">(+)</span>
+  <b>Solver path selection prevents choosing failure-prone paths:</b>
+  On git-multibranch, the ILP selected a 13-step path from a 14-node merged graph,
+  correctly choosing full E2E verification over a greedy shortcut at a critical branching point
+  (see <a href="#appendix-solver">Appendix B</a>).
+  Two replans further adapted the plan after permission errors and hook failures, completing in 44 calls &mdash;
+  while Terminus-KIRA got stuck in a heredoc and timed out (12 calls).
+</p>
+<p>
+  <span style="color:var(--red);font-weight:600;">(&ndash;)</span>
+  <b>model-extraction fails for both &mdash; capability limit, not planning:</b>
+  Both agents extracted the matrix but achieved ~9.3% reconstruction error, short of the required accuracy.
+  This is a Haiku capability limit on analytical ML attack strategy, not addressable by planning alone.
+</p>
+
+<h3>4.3 0% Group</h3>
+<p>
+  TAPE breaks through on 1 of 2 zero-base-rate tasks via iterative replanning.
+  sqlite-db-truncate remains a capability limit for both agents &mdash; neither attempts the right recovery tool.
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 5. 0% Group Results</p>
+<table>
+  <thead>
+    <tr><th>Task</th><th>Base</th><th>Terminus-KIRA</th><th>Terminus-KIRA + TAPE</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>sqlite-db-truncate</code></td><td>0%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">17 calls &middot; 1.6m &middot; $0.09</span></td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">35 calls &middot; 4.8m &middot; $0.65</span></td>
+      <td>Both fail. Capability limit for Haiku on DB recovery.</td>
+    </tr>
+    <tr>
+      <td><code>large-scale-text-editing</code></td><td>0%</td>
+      <td><span class="tag tag-red">X</span><br><span class="muted">302 calls &middot; 17.2m &middot; $1.76</span></td>
+      <td><b><span class="tag tag-green">O</span></b><br><span class="muted">157 calls &middot; 20m (timeout) &middot; $1.22</span></td>
+      <td>TAPE breakthrough on a 0% task! Structured subgoals enabled systematic bulk editing.</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  <span style="color:var(--green);font-weight:600;">(+)</span>
+  <b>Replanning converges on correct strategy for large-scale-text-editing:</b>
+  TAPE succeeded on a 0%-base-rate task through 11 replanning cycles that iteratively refined a Vim macro approach
+  for bulk CSV transformation (157 calls, $1.22).
+  Terminus-KIRA wrote a near-correct script but omitted a single execution line (<code>:%normal! @c</code>),
+  then entered a false-completion loop &mdash; spending 100+ episodes echoing &ldquo;Task Complete&rdquo;
+  without ever recognizing the bug (302 calls, $1.76).
+  TAPE&rsquo;s mismatch detection prevented this: each replan re-evaluated terminal state against predicted state,
+  catching incomplete execution and re-triggering the planning pipeline.
+</p>
+<p>
+  <span style="color:var(--red);font-weight:600;">(&ndash;)</span>
+  <b>sqlite-db-truncate fails for both &mdash; domain knowledge gap:</b>
+  Both agents attempted raw binary parsing of the truncated SQLite file instead of using built-in recovery tools
+  (<code>sqlite3 .recover</code>). TAPE scored 6/10 correct values (needed &gt;6), Terminus-KIRA scored 0/10.
+  TAPE&rsquo;s planning overhead made it 7x more expensive ($0.65 vs $0.09) without improving the outcome &mdash;
+  the bottleneck is domain knowledge (SQLite page format parsing), not task structure.
+</p>
+
+<!-- ============================================================ -->
+<h2>5. Conclusion &amp; Next Steps</h2>
+
+<p>
+  Findings from TAPE&rsquo;s controlled experiments (Sokoban) transfer to real-world terminal tasks:
+  solve rate 4/10 &rarr; 8/10, 0 regressions, 28% lower average cost.
+  Planning overhead on simple tasks and base-model capability limits remain open.
+</p>
+
+<p><b>Next steps:</b></p>
+<ol>
+  <li><b>Statistical validation</b> &mdash; scale to 5 runs on the 10 selected tasks to confirm these findings are statistically significant</li>
+  <li><b>Full benchmark evaluation</b> &mdash; expand to all 89 Terminal-Bench 2.0 tasks to measure aggregate score improvement</li>
+  <li><b>Address remaining limitations</b> &mdash; investigate stronger models (Sonnet) for capability-limited tasks (model-extraction, sqlite-db-truncate), and reduce planning overhead on simple tasks</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2 id="appendix-clusters">Appendix A. Task Cluster Breakdown</h2>
+<p>Full clustering of 89 Terminal-Bench 2.0 tasks by base success rate and characteristics.</p>
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Table 6. Task Clusters by Base Success Rate</p>
+<table>
+  <thead>
+    <tr><th>Cluster</th><th>Characteristics</th><th>~Tasks</th><th>Base Rate</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>A. Simple operations</td><td>Single clear action, no planning needed</td><td>~10</td><td>100%</td></tr>
+    <tr><td>B. Config / setup</td><td>Environment setup, service configuration</td><td>~6</td><td>75&ndash;80%</td></tr>
+    <tr><td>C. Code analysis / generation</td><td>Read, modify, or generate code</td><td>~7</td><td>60%</td></tr>
+    <tr><td>D. Complex multi-step</td><td>Diagnose &rarr; attempt &rarr; adapt</td><td>~13</td><td>20&ndash;40%</td></tr>
+    <tr><td>E-1. ML/AI systems</td><td>Model loading, training, inference</td><td>~10</td><td>0%</td></tr>
+    <tr><td>E-2. Data / DB</td><td>Data recovery, queries</td><td>~4</td><td>0%</td></tr>
+    <tr><td>E-3. Text / parsing</td><td>Bulk text manipulation</td><td>~6</td><td>0%</td></tr>
+    <tr><td>E-4. Systems / hardware</td><td>Low-level, VM, circuits</td><td>~5</td><td>0%</td></tr>
+    <tr><td>E-5. Domain expert</td><td>Bio, crypto, graphics</td><td>~10</td><td>0%</td></tr>
+  </tbody>
+</table>
+
+<p>
+  <b>Coverage of selected 10 tasks:</b> 10 distinct domains, complexity from Low (fix-git) through
+  Very High (model-extraction), base rates spanning 0%&ndash;100%.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="appendix-solver">Appendix B. ILP Path Selection: git-multibranch</h2>
+<p>
+  The merged plan graph for <code>git-multibranch</code> (tape-plan-0) is the clearest example of
+  solver-integrated planning adding value. Four candidate plans (9&ndash;18 steps) were merged into a
+  27-node, 38-edge graph. The ILP selected a 13-step path (total reward&nbsp;=&nbsp;12.3) that
+  made two non-trivial routing decisions.
+</p>
+
+<p style="font-size:0.82rem;font-weight:600;margin-bottom:4px;">Figure 2. Merged Plan Graph for git-multibranch (ILP-selected path highlighted)</p>
+<svg viewBox="0 0 750 490" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:750px;margin:20px auto;display:block;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="ag" markerWidth="10" markerHeight="8" refX="25" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#1a7a3a"/>
+    </marker>
+    <marker id="ar" markerWidth="10" markerHeight="8" refX="25" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#c0392b"/>
+    </marker>
+    <marker id="ay" markerWidth="10" markerHeight="8" refX="25" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#ddd"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Critical decision highlight ===== -->
+  <rect x="42" y="360" width="470" height="60" rx="6" fill="#fff5f5" stroke="#e8c4c4" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="52" y="373" font-size="8" fill="#c0392b" font-weight="600">CRITICAL DECISION</text>
+
+  <!-- ========== NON-SELECTED EDGES (gray, behind) ========== -->
+  <!-- start → 0 (alt entry) -->
+  <line x1="300" y1="35" x2="280" y2="175" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- start → 1 (alt entry) -->
+  <line x1="300" y1="35" x2="460" y2="175" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 0 → 2 (skip repo) -->
+  <line x1="280" y1="175" x2="380" y2="250" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 2 → 6 (skip middle) -->
+  <line x1="380" y1="250" x2="260" y2="390" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 3 → 10 (early test) -->
+  <line x1="200" y1="250" x2="440" y2="390" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 6 → 10 (direct test) -->
+  <line x1="260" y1="390" x2="440" y2="390" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 12 → 6 (alt) -->
+  <line x1="80" y1="325" x2="260" y2="390" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 4 → 5 (alt ordering) -->
+  <line x1="90" y1="175" x2="250" y2="325" stroke="#ddd" stroke-width="1" marker-end="url(#ay)"/>
+  <!-- 7 → 8 SHORTCUT (red) -->
+  <line x1="110" y1="390" x2="110" y2="460" stroke="#c0392b" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#ar)"/>
+
+  <!-- ========== SELECTED PATH EDGES (green, on top) ========== -->
+  <!-- start → 9 -->
+  <line x1="300" y1="35" x2="90" y2="105" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 9 → 4 -->
+  <line x1="90" y1="105" x2="90" y2="175" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 4 → 0 -->
+  <line x1="90" y1="175" x2="280" y2="175" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 0 → 1 -->
+  <line x1="280" y1="175" x2="460" y2="175" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 1 → 2 -->
+  <line x1="460" y1="175" x2="380" y2="250" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 2 → 3 -->
+  <line x1="380" y1="250" x2="200" y2="250" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 3 → 12 -->
+  <line x1="200" y1="250" x2="80" y2="325" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 12 → 5 -->
+  <line x1="80" y1="325" x2="250" y2="325" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 5 → 6 -->
+  <line x1="250" y1="325" x2="260" y2="390" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 6 → 7 -->
+  <line x1="260" y1="390" x2="110" y2="390" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 7 → 10 (curve around 6) -->
+  <path d="M 110,390 Q 270,440 440,390" fill="none" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 10 → 11 -->
+  <line x1="440" y1="390" x2="340" y2="460" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+  <!-- 11 → 8 -->
+  <line x1="340" y1="460" x2="110" y2="460" stroke="#1a7a3a" stroke-width="2.2" marker-end="url(#ag)"/>
+
+  <!-- ========== NODES (on top, white fill covers lines) ========== -->
+  <!-- start -->
+  <circle cx="300" cy="35" r="15" fill="#f0f0f0" stroke="#888" stroke-width="1.5"/>
+  <text x="300" y="39" text-anchor="middle" font-size="9" font-weight="600" fill="#333">S</text>
+  <!-- 9: packages -->
+  <circle cx="90" cy="105" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="90" y="109" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">9</text>
+  <!-- 4: SSL -->
+  <circle cx="90" cy="175" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="90" y="179" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">4</text>
+  <!-- 0: dirs -->
+  <circle cx="280" cy="175" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="280" y="179" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">0</text>
+  <!-- 1: repo -->
+  <circle cx="460" cy="175" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="460" y="179" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">1</text>
+  <!-- 2: SSH -->
+  <circle cx="380" cy="250" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="380" y="254" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">2</text>
+  <!-- 3: hook -->
+  <circle cx="200" cy="250" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="200" y="254" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">3</text>
+  <!-- 12: deploy dirs -->
+  <circle cx="80" cy="325" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="80" y="329" text-anchor="middle" font-size="8" font-weight="600" fill="#1a7a3a">12</text>
+  <!-- 5: nginx -->
+  <circle cx="250" cy="325" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="250" y="329" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">5</text>
+  <!-- 6: services -->
+  <circle cx="260" cy="390" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="260" y="394" text-anchor="middle" font-size="9" font-weight="600" fill="#1a7a3a">6</text>
+  <!-- 7: verify -->
+  <circle cx="110" cy="390" r="15" fill="#fff" stroke="#c0392b" stroke-width="2"/>
+  <text x="110" y="394" text-anchor="middle" font-size="9" font-weight="700" fill="#c0392b">7</text>
+  <!-- 10: E2E test -->
+  <circle cx="440" cy="390" r="15" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="440" y="394" text-anchor="middle" font-size="8" font-weight="600" fill="#1a7a3a">10</text>
+  <!-- 11: verified (GOAL) -->
+  <circle cx="340" cy="460" r="15" fill="#c8eac8" stroke="#1a7a3a" stroke-width="2"/>
+  <text x="340" y="464" text-anchor="middle" font-size="8" font-weight="700" fill="#1a7a3a">11</text>
+  <!-- 8: complete (GOAL) -->
+  <circle cx="110" cy="460" r="15" fill="#c8eac8" stroke="#1a7a3a" stroke-width="2"/>
+  <text x="110" y="464" text-anchor="middle" font-size="9" font-weight="700" fill="#1a7a3a">8</text>
+
+  <!-- ========== EDGE REWARD LABELS ========== -->
+  <!-- n7→n8 shortcut totals -->
+  <text x="122" y="425" font-size="7" fill="#c0392b" font-style="italic">shortcut</text>
+  <text x="122" y="436" font-size="8" fill="#c0392b" font-weight="600">total r=0.99</text>
+  <text x="122" y="447" font-size="8" fill="#c0392b">cost=0.1</text>
+  <!-- n7→10→11→8 selected totals -->
+  <text x="252" y="435" font-size="7" fill="#1a7a3a" font-style="italic">full E2E test</text>
+  <text x="252" y="446" font-size="8" fill="#1a7a3a" font-weight="600">total r=2.76</text>
+  <text x="252" y="457" font-size="8" fill="#1a7a3a">cost=5.6</text>
+
+  <!-- ========== LEGEND (right side) ========== -->
+  <text x="540" y="32" font-size="10" font-weight="600" fill="#333">Merged Plan Graph</text>
+  <text x="540" y="46" font-size="8" fill="#888">14 nodes &middot; 31 edges</text>
+  <text x="540" y="62" font-size="8" fill="#888">4 candidate plans merged</text>
+
+  <line x1="540" y1="78" x2="570" y2="78" stroke="#1a7a3a" stroke-width="2.2"/>
+  <text x="576" y="82" font-size="8.5" fill="#555">ILP-selected path (13 steps)</text>
+  <line x1="540" y1="94" x2="570" y2="94" stroke="#ddd" stroke-width="1"/>
+  <text x="576" y="98" font-size="8.5" fill="#999">Alternative edges</text>
+  <line x1="540" y1="110" x2="570" y2="110" stroke="#c0392b" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="576" y="114" font-size="8.5" fill="#c0392b">Greedy shortcut</text>
+
+  <circle cx="547" cy="134" r="6" fill="#e8f5e9" stroke="#1a7a3a" stroke-width="1"/>
+  <text x="560" y="138" font-size="8.5" fill="#555">On selected path</text>
+  <circle cx="547" cy="150" r="6" fill="#c8eac8" stroke="#1a7a3a" stroke-width="1.5"/>
+  <text x="560" y="154" font-size="8.5" fill="#555">Goal node</text>
+
+  <text x="540" y="180" font-size="9" font-weight="600" fill="#333">Node Legend</text>
+  <text x="540" y="197" font-size="8.5" fill="#555"><tspan font-weight="600">S</tspan> &nbsp;Entry point</text>
+  <text x="540" y="213" font-size="8.5" fill="#555"><tspan font-weight="600">0</tspan> &nbsp;Create dirs</text>
+  <text x="540" y="229" font-size="8.5" fill="#555"><tspan font-weight="600">1</tspan> &nbsp;Init bare repo</text>
+  <text x="540" y="245" font-size="8.5" fill="#555"><tspan font-weight="600">2</tspan> &nbsp;Configure SSH</text>
+  <text x="540" y="261" font-size="8.5" fill="#555"><tspan font-weight="600">3</tspan> &nbsp;Post-receive hook</text>
+  <text x="540" y="277" font-size="8.5" fill="#555"><tspan font-weight="600">4</tspan> &nbsp;Generate SSL cert</text>
+  <text x="540" y="293" font-size="8.5" fill="#555"><tspan font-weight="600">5</tspan> &nbsp;Configure Nginx</text>
+  <text x="540" y="309" font-size="8.5" fill="#555"><tspan font-weight="600">6</tspan> &nbsp;Start services</text>
+  <text x="540" y="325" font-size="8.5" fill="#c0392b"><tspan font-weight="600">7</tspan> &nbsp;Verify setup (branch pt)</text>
+  <text x="540" y="341" font-size="8.5" fill="#555"><tspan font-weight="600">8</tspan> &nbsp;Complete (GOAL)</text>
+  <text x="540" y="357" font-size="8.5" fill="#555"><tspan font-weight="600">9</tspan> &nbsp;Install packages</text>
+  <text x="540" y="373" font-size="8.5" fill="#555"><tspan font-weight="600">10</tspan> Run E2E test</text>
+  <text x="540" y="389" font-size="8.5" fill="#555"><tspan font-weight="600">11</tspan> Verified (GOAL)</text>
+  <text x="540" y="405" font-size="8.5" fill="#555"><tspan font-weight="600">12</tspan> Deploy dirs</text>
+</svg>
+
+<p>
+  <b>Key insight:</b> At node 7, the ILP chose the <span style="color:#1a7a3a;font-weight:600;">full E2E test path 7&rarr;10&rarr;11&rarr;8</span>
+  (total reward=2.76, cost=5.6) over the <span style="color:#c0392b;">greedy shortcut 7&rarr;8</span> (total reward=0.99, cost=0.1).
+  A greedy policy would take the shortcut &mdash; lower cost and direct to goal.
+  But the ILP maximizes <i>total path reward</i>: the longer route collects 2 goal nodes and nearly 3x the reward.
+  The end-to-end test turned out to be essential &mdash; the verifier required actual deployment verification,
+  not just &ldquo;setup complete.&rdquo;
+</p>
+<p>
+  In compile-compcert (tape-plan-4), a similar pattern emerged: a 21-node graph with ILP selecting
+  a reward-3.0 path over alternatives scoring 2.0, routing around a high-risk &ldquo;build from source&rdquo; edge (r=0.65).
+</p>
+
+<!-- ============================================================ -->
+<hr class="divider">
+<h2 id="ref-tape">References</h2>
+<p style="font-size:0.82rem;">
+  Jongwon Jeong, Jungtaek Kim, and Kangwook Lee.
+  &ldquo;TAPE: Tool-Guided Adaptive Planning and Constrained Execution in Language Model Agents.&rdquo;
+  <i>arXiv preprint arXiv:2602.19633</i>, 2026.
+</p>
+
+<hr class="divider">
+<p style="font-size:0.78rem;color:var(--light);text-align:center;">
+  Terminus-KIRA + TAPE PoC &middot; Terminal-Bench 2.0 &middot; April 2026
+</p>
+
+</body>
+</html>
