@@ -21,5 +21,6 @@ Rules:
 - Do NOT include specific shell commands — the agent will decide how to accomplish each subgoal.
 - Consider what has already been accomplished in the history when planning next steps. Do NOT repeat already completed steps.
 - Prefer more granular subgoals over fewer large ones. 5-10 small subgoals is better than 3 big ones.
+- CRITICAL: The task description defines hard constraints. You MUST plan to satisfy these constraints exactly — do NOT substitute or approximate. Never plan around a constraint because it seems difficult or impossible — instead, plan to overcome the obstacle while keeping the constraint. This applies even when agent observations suggest a constraint cannot be met — treat such observations as incomplete analysis requiring deeper investigation, not as ground truth.
 
 Call the submit_plan tool with your plan.
