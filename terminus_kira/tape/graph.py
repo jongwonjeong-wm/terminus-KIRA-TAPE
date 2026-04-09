@@ -197,6 +197,10 @@ class PlanGraphBuilder:
         """
         graph = PlanGraphData()
 
+        # Track reward sum + count per node for mean calculation
+        node_reward_sums: dict[str, float] = {}
+        node_reward_counts: dict[str, int] = {}
+
         # Create start node
         start_id = "start"
         graph.nodes[start_id] = PlanNode(
@@ -269,16 +273,26 @@ class PlanGraphBuilder:
                     node_id=node_id,
                     state_description=info["subgoal"].predicted_state,
                     is_goal=is_goal,
+                    reward=info["subgoal"].reward,
                 )
+                node_reward_sums[node_id] = info["subgoal"].reward
+                node_reward_counts[node_id] = 1
                 if is_goal:
                     graph.goal_nodes.append(node_id)
             else:
-                # If any merged state is a goal state, mark the node as goal
+                # Accumulate reward for mean calculation
                 info = state_id_to_info[state_id]
                 node_id = canonical_to_node_id[canonical_id]
+                node_reward_sums[node_id] = node_reward_sums.get(node_id, 0.0) + info["subgoal"].reward
+                node_reward_counts[node_id] = node_reward_counts.get(node_id, 0) + 1
                 if info["is_last"] and not graph.nodes[node_id].is_goal:
                     graph.nodes[node_id].is_goal = True
                     graph.goal_nodes.append(node_id)
+
+        # Apply mean reward to all nodes
+        for node_id, node in graph.nodes.items():
+            if node_id in node_reward_sums:
+                node.reward = node_reward_sums[node_id] / node_reward_counts[node_id]
 
         # Create edges
         edge_counter = 0
@@ -303,7 +317,6 @@ class PlanGraphBuilder:
                         from_node=prev_node_id,
                         to_node=target_node_id,
                         subgoal=subgoal,
-                        reward=subgoal.reward,
                         cost=subgoal.estimated_duration,
                     )
 

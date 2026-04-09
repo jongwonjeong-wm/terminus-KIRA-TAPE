@@ -137,13 +137,13 @@ from terminus_kira.tape.graph import PlanGraphBuilder
 from terminus_kira.tape.solver import ILPSolver
 
 
-def make_subgoal(plan_id, step, desc, state, prob=0.9, dur=2.0, tool=ToolType.EXECUTE_COMMANDS):
+def make_subgoal(plan_id, step, desc, state, reward=0.5, dur=2.0, tool=ToolType.EXECUTE_COMMANDS):
     return Subgoal(
         id=f"subgoal_p{plan_id}_s{step}",
         description=desc,
         predicted_tool=tool,
         predicted_state=state,
-        success_probability=prob,
+        reward=reward,
         estimated_duration=dur,
     )
 
@@ -176,7 +176,6 @@ def make_test_plans():
     ])
 
     for p in [plan0, plan1, plan2]:
-        p.total_success_prob = math.prod(sg.success_probability for sg in p.subgoals)
         p.total_estimated_duration = sum(sg.estimated_duration for sg in p.subgoals)
 
     return [plan0, plan1, plan2]
@@ -242,9 +241,10 @@ async def test_graph_builder():
 
     print("\n  Edges:")
     for eid, edge in graph.edges.items():
+        node_reward = graph.nodes[edge.to_node].reward
         print(
             f"    {eid}: {edge.from_node} -> {edge.to_node} "
-            f"[r={edge.reward:.2f}, c={edge.cost:.1f}] "
+            f"[r={node_reward:.2f}, c={edge.cost:.1f}] "
             f"{edge.subgoal.description[:40]}..."
         )
 
@@ -288,9 +288,10 @@ def test_solver(graph):
     print("\n  Path:")
     for i, edge in enumerate(path.edges):
         sg = edge.subgoal
+        node_reward = graph.nodes[edge.to_node].reward
         print(
             f"    Step {i + 1}: [{sg.predicted_tool.value}] {sg.description} "
-            f"(r={edge.reward:.2f}, c={edge.cost:.1f}s)"
+            f"(r={node_reward:.2f}, c={edge.cost:.1f}s)"
         )
 
     assert path.total_steps > 0, "Empty path"
@@ -319,7 +320,7 @@ def test_selected_path():
     print("=" * 60)
 
     sg = make_subgoal(0, 0, "test", "state", 0.9, 1.0)
-    edge = PlanEdge("e0", "start", "n0", sg, 0.9, 1.0)
+    edge = PlanEdge("e0", "start", "n0", sg, 1.0)
     path = SelectedPath(edges=[edge, edge], total_reward=1.8, total_cost=2.0)
 
     assert not path.is_complete
@@ -382,11 +383,11 @@ async def test_simulator_llm(plans):
 
     print(f"  Simulated {len(simulated)} plans")
     for plan in simulated:
-        print(f"\n  Plan {plan.plan_id} (prob={plan.total_success_prob:.3f}, dur={plan.total_estimated_duration:.1f}s):")
+        print(f"\n  Plan {plan.plan_id} (dur={plan.total_estimated_duration:.1f}s):")
         for sg in plan.subgoals:
             print(f"    - {sg.description}")
             print(f"      state: {sg.predicted_state[:80]}...")
-            print(f"      prob={sg.success_probability:.2f}, dur={sg.estimated_duration:.1f}s")
+            print(f"      reward={sg.reward:.2f}, dur={sg.estimated_duration:.1f}s")
 
     assert len(simulated) > 0, "No simulations succeeded"
     print("\n  ✓ Simulator OK")
@@ -416,11 +417,11 @@ async def test_mismatch_checker_llm():
         task_instruction=task,
     )
     print(f"  Status: {status1}")
-    assert status1 == SubgoalStatus.COMPLETED_MATCH, f"Expected COMPLETED_MATCH, got {status1}"
+    assert status1 == SubgoalStatus.COMPLETE, f"Expected COMPLETE, got {status1}"
     print("  ✓ Match case OK")
 
-    # --- Case 2: MISMATCH (subgoal completed, but state diverged) ---
-    print("\n  --- Case 2: Completed + Mismatch ---")
+    # --- Case 2: Failed attempt (should not be marked complete) ---
+    print("\n  --- Case 2: Failed Attempt ---")
     status2 = await checker.check(
         terminal_history=(
             "$ echo 'Hello World' > hello.txt\n"
@@ -434,8 +435,10 @@ async def test_mismatch_checker_llm():
         task_instruction=task,
     )
     print(f"  Status: {status2}")
-    assert status2 == SubgoalStatus.COMPLETED_MISMATCH, f"Expected COMPLETED_MISMATCH, got {status2}"
-    print("  ✓ Mismatch case OK")
+    assert status2 in {SubgoalStatus.IN_PROGRESS, SubgoalStatus.REPLAN}, (
+        f"Expected IN_PROGRESS or REPLAN, got {status2}"
+    )
+    print("  ✓ Failed-attempt case OK")
 
     # --- Case 3: IN_PROGRESS (subgoal not done yet) ---
     print("\n  --- Case 3: In Progress ---")
@@ -487,15 +490,15 @@ async def test_execution_loop():
     """Test TerminusKiraTAPE execution loop with mocked terminal + mocked LLM.
 
     Simulates a 3-subgoal task:
-      Subgoal 1: Create hello.txt       → execute → COMPLETED_MATCH → advance
-      Subgoal 2: Verify file content     → execute → IN_PROGRESS → execute again → COMPLETED_MATCH → advance
+      Subgoal 1: Create hello.txt       → execute → COMPLETE → advance
+      Subgoal 2: Verify file content     → execute → IN_PROGRESS → execute again → COMPLETE → advance
       Subgoal 3: Mark task complete       → task_complete → done
 
     This tests:
       - TAPE planning pipeline → constrained execution loop
       - Subgoal injection on first attempt (tool_choice + tool description + observation)
       - IN_PROGRESS: no injection on continuation episode
-      - COMPLETED_MATCH → advance to next subgoal
+      - COMPLETE → advance to next subgoal
       - Task completion handling
     """
     print("\n" + "=" * 60)
@@ -521,7 +524,7 @@ async def test_execution_loop():
         description="Create hello.txt with content 'Hello World'",
         predicted_tool=ToolType.EXECUTE_COMMANDS,
         predicted_state="$ echo 'Hello World' > hello.txt\n$",
-        success_probability=0.95,
+        reward=0.3,
         estimated_duration=1.0,
     )
     sg2 = Subgoal(
@@ -529,7 +532,7 @@ async def test_execution_loop():
         description="Verify hello.txt contains correct content",
         predicted_tool=ToolType.EXECUTE_COMMANDS,
         predicted_state="$ cat hello.txt\nHello World\n$",
-        success_probability=0.9,
+        reward=0.7,
         estimated_duration=1.0,
     )
     sg3 = Subgoal(
@@ -537,14 +540,14 @@ async def test_execution_loop():
         description="Mark the task as complete",
         predicted_tool=ToolType.TASK_COMPLETE,
         predicted_state="task completed",
-        success_probability=1.0,
+        reward=1.0,
         estimated_duration=0.1,
     )
 
     edges = [
-        PlanEdge("e0", "start", "node_0", sg1, reward=0.95, cost=1.0),
-        PlanEdge("e1", "node_0", "node_1", sg2, reward=0.9, cost=1.0),
-        PlanEdge("e2", "node_1", "node_2", sg3, reward=1.0, cost=0.1),
+        PlanEdge("e0", "start", "node_0", sg1, cost=1.0),
+        PlanEdge("e1", "node_0", "node_1", sg2, cost=1.0),
+        PlanEdge("e2", "node_1", "node_2", sg3, cost=0.1),
     ]
     selected_path = SelectedPath(edges=edges, total_reward=0.855, total_cost=2.1)
 
@@ -586,9 +589,9 @@ async def test_execution_loop():
     call_log = []  # (episode, subgoal_idx, was_injected, prompt_snippet)
 
     # Define episode-by-episode behavior:
-    # Episode 0: sg1 injected, agent runs echo cmd → COMPLETED_MATCH
+    # Episode 0: sg1 injected, agent runs echo cmd → COMPLETE
     # Episode 1: sg2 injected, agent runs cat cmd → IN_PROGRESS
-    # Episode 2: sg2 continues (no injection), agent runs cat again → COMPLETED_MATCH
+    # Episode 2: sg2 continues (no injection), agent runs cat again → COMPLETE
     # Episode 3: sg3 injected, agent calls task_complete → first confirmation
     # Episode 4: sg3 continues (no injection), agent calls task_complete → double confirm → done
 
@@ -645,9 +648,9 @@ async def test_execution_loop():
 
     # Mismatch checker behavior per episode
     mismatch_results = [
-        SubgoalStatus.COMPLETED_MATCH,      # ep0: sg1 done
-        SubgoalStatus.IN_PROGRESS,           # ep1: sg2 still going
-        SubgoalStatus.COMPLETED_MATCH,       # ep2: sg2 done
+        SubgoalStatus.COMPLETE,             # ep0: sg1 done
+        SubgoalStatus.IN_PROGRESS,          # ep1: sg2 still going
+        SubgoalStatus.COMPLETE,             # ep2: sg2 done
         # ep3 & ep4: task_complete, mismatch checker not called
     ]
     mismatch_call_counter = [0]
@@ -713,7 +716,7 @@ async def test_execution_loop():
     # ── Assertions ────────────────────────────────────────────────────
     assert len(call_log) == 5, f"Expected 5 episodes, got {len(call_log)}"
 
-    # Episode 0: sg1, injected=True, tool_choice=True → COMPLETED_MATCH → advance
+    # Episode 0: sg1, injected=True, tool_choice=True → COMPLETE → advance
     assert call_log[0]["subgoal_idx"] == 0, "ep0 should be on subgoal 0"
     assert call_log[0]["was_injected"], "ep0 should have subgoal injected in prompt"
     assert call_log[0]["tool_choice_active"], "ep0 should have tool_choice set"
@@ -724,7 +727,7 @@ async def test_execution_loop():
     assert call_log[1]["was_injected"], "ep1 should have subgoal injected (first attempt at sg2)"
     assert call_log[1]["tool_choice_active"], "ep1 should have tool_choice set"
 
-    # Episode 2: sg2 continues (IN_PROGRESS), injected=False → COMPLETED_MATCH → advance
+    # Episode 2: sg2 continues (IN_PROGRESS), injected=False → COMPLETE → advance
     assert call_log[2]["subgoal_idx"] == 1, "ep2 should still be on subgoal 1"
     assert not call_log[2]["was_injected"], "ep2 should NOT have subgoal injected (continuation)"
     assert not call_log[2]["tool_choice_active"], "ep2 should NOT have tool_choice (continuation)"
@@ -746,7 +749,7 @@ async def test_execution_loop():
     print("\n  ✓ Execution loop test PASSED")
     print("    - Subgoal injection works on first attempt only")
     print("    - IN_PROGRESS continues without injection")
-    print("    - COMPLETED_MATCH advances to next subgoal")
+    print("    - COMPLETE advances to next subgoal")
     print("    - Task completion with double-confirmation works")
     print("    - Found and fixed bug: task_complete no longer advances path prematurely")
 

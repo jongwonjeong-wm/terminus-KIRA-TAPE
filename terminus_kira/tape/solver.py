@@ -1,10 +1,15 @@
 """ILPSolver — PuLP-based optimal path selection on the plan graph.
 
-Implements the time-expanded ILP formulation from the TAPE paper (Section 3.2),
+Implements the ILP formulation from the TAPE paper (Section 3.2),
 adapted for the plan graph structure used in Terminus-Kira.
 
-Objective: maximize Σ log(p_e) * x_e  (= maximize path success probability)
-           with small cost penalty λ for tie-breaking (prefer faster paths).
+Objective: maximize Σ reward(to_node(e)) * x_e - λ * Σ cost_e * x_e
+           (= maximize total node reward along path, with cost tie-breaking)
+
+Per the paper, reward is a scalar per NODE (state quality), not per edge.
+  +1  = goal state
+  0~1 = closer to solving the task
+  -1~0 = moving toward failure
 """
 
 import logging
@@ -73,7 +78,6 @@ class ILPSolver:
                 from_node=goal_id,
                 to_node=sink_id,
                 subgoal=None,  # type: ignore — sink edges aren't real actions
-                reward=0.0,
                 cost=0.0,
             )
 
@@ -98,13 +102,17 @@ class ILPSolver:
             for eid in all_edges
         }
 
-        # Objective: maximize total reward with cost penalty
-        # reward: 1=goal, 0=normal, negative=risky (from simulator)
+        # Objective: maximize total node reward along path with cost penalty
+        # For each edge e, reward comes from the destination node (to_node).
+        # This is equivalent to summing node rewards on the selected path,
+        # since each visited node has exactly one incoming edge selected.
         # -λ * cost: prefer faster paths as tie-breaker
         prob += lpSum(
-            (all_edges[eid].reward - self.cost_penalty * all_edges[eid].cost) * x[eid]
+            (graph.nodes[all_edges[eid].to_node].reward if all_edges[eid].to_node in graph.nodes else 0.0)
+            * x[eid]
+            - self.cost_penalty * all_edges[eid].cost * x[eid]
             for eid in all_edges
-        ), "TotalReward"
+        ), "TotalNodeReward"
 
         # Constraint 1: Flow out of start = 1
         prob += (
@@ -187,7 +195,12 @@ class ILPSolver:
             logger.warning("[TAPE Solver] Could not reconstruct path from solution")
             return None
 
-        total_reward = sum(e.reward for e in ordered_edges)
+        # Sum node rewards: each edge contributes its destination node's reward
+        total_reward = sum(
+            graph.nodes[e.to_node].reward
+            for e in ordered_edges
+            if e.to_node in graph.nodes
+        )
         total_cost = sum(e.cost for e in ordered_edges)
 
         logger.info(

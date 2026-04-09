@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import litellm
+
+litellm.modify_params = True  # Allow litellm to add dummy tools for Anthropic summarization calls
+
 from litellm.exceptions import (
     AuthenticationError as LiteLLMAuthenticationError,
     BadRequestError,
@@ -416,8 +419,13 @@ class TerminusKira(Terminus2):
                 analysis = arguments.get("analysis", "")
                 plan = arguments.get("plan", "")
 
-                # Extract commands array
+                # Extract commands array — Haiku sometimes stringifies the array
                 cmds = arguments.get("commands", [])
+                if isinstance(cmds, str):
+                    try:
+                        cmds = json.loads(cmds)
+                    except json.JSONDecodeError:
+                        cmds = []
                 for cmd in cmds:
                     if isinstance(cmd, str):
                         # LLM sent plain string instead of dict

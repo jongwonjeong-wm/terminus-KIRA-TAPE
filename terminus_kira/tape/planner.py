@@ -36,7 +36,17 @@ _TOOL_TYPE_MAP = {
 # Tool description strings (mirroring terminus_kira.py pattern)
 _SUBMIT_PLAN_DESC = "Submit a high-level plan as a sequence of subgoals."
 
+_PLAN_RATIONALE_DESC = (
+    "Explain your overall approach before listing subgoals. "
+    "What is the key challenge? What strategy will you use and why?"
+)
+
 _SUBGOALS_DESC = "Ordered list of subgoals to accomplish the task."
+
+_SUBGOAL_REASON_DESC = (
+    "Why is this specific step necessary at this point in the plan? "
+    "What would happen if this step were skipped?"
+)
 
 _SUBGOAL_DESC = (
     "What this step should ACHIEVE (goal-oriented, not method-oriented). "
@@ -62,12 +72,20 @@ PLANNER_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "plan_rationale": {
+                        "type": "string",
+                        "description": _PLAN_RATIONALE_DESC,
+                    },
                     "subgoals": {
                         "type": "array",
                         "description": _SUBGOALS_DESC,
                         "items": {
                             "type": "object",
                             "properties": {
+                                "subgoal_reason": {
+                                    "type": "string",
+                                    "description": _SUBGOAL_REASON_DESC,
+                                },
                                 "description": {
                                     "type": "string",
                                     "description": _SUBGOAL_DESC,
@@ -78,11 +96,11 @@ PLANNER_TOOLS = [
                                     "description": _PREDICTED_TOOL_DESC,
                                 },
                             },
-                            "required": ["description", "predicted_tool"],
+                            "required": ["subgoal_reason", "description", "predicted_tool"],
                         },
                     },
                 },
-                "required": ["subgoals"],
+                "required": ["plan_rationale", "subgoals"],
             },
         },
     },
@@ -193,12 +211,17 @@ class TAPEPlanner:
             subgoals.append(
                 Subgoal(
                     id=f"subgoal_p{plan_id}_s{i}",
+                    subgoal_reason=step.get("subgoal_reason", ""),
                     description=step.get("description", ""),
                     predicted_tool=tool_type,
                 )
             )
 
-        return Plan(plan_id=plan_id, subgoals=subgoals)
+        return Plan(
+            plan_id=plan_id,
+            subgoals=subgoals,
+            plan_rationale=result.get("plan_rationale", ""),
+        )
 
     async def generate_plans(
         self,

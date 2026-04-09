@@ -127,7 +127,10 @@ class MismatchChecker:
         agent_analysis: str = "",
         agent_plan: str = "",
         recent_outputs: list[str] | None = None,
-    ) -> str:
+        estimated_duration: float | None = None,
+        duration_reason: str = "",
+        elapsed_time: float | None = None,
+    ) -> tuple[str, str]:
         """Single-call step judgment.
 
         Returns one of:
@@ -145,9 +148,30 @@ class MismatchChecker:
                 truncated = output[-1500:] if len(output) > 1500 else output
                 recent_context += f"[Turn -{len(recent_outputs)-i}]\n{truncated}\n\n"
 
+        timing_parts = []
+        if estimated_duration is not None:
+            duration_str = f"Estimated duration: {estimated_duration:.0f}s"
+            if duration_reason:
+                duration_str += f" ({duration_reason})"
+            timing_parts.append(duration_str)
+        if elapsed_time is not None:
+            timing_parts.append(f"Elapsed so far: {elapsed_time:.0f}s")
+        if elapsed_time is not None and estimated_duration is not None and elapsed_time > estimated_duration:
+            timing_parts.append(
+                f"⚠ This step has exceeded its estimated duration by {elapsed_time - estimated_duration:.0f}s. "
+                f"Consider whether the agent is still making meaningful progress toward the subgoal, "
+                f"or whether it is stuck, looping, or taking a wrong approach. "
+                f"If there is clear forward progress, IN_PROGRESS may still be appropriate. "
+                f"If the agent appears stuck or misdirected, prefer REPLAN."
+            )
+
         user_parts = [
             f"# Task\n{task_instruction}",
             f"# Current Subgoal\n{subgoal_description}",
+        ]
+        if timing_parts:
+            user_parts.append(f"# Timing\n" + "\n".join(timing_parts))
+        user_parts += [
             f"# Predicted State (from simulation)\n{predicted_state or '(none)'}",
             f"# Agent's Intent\n"
             f"Analysis: {agent_analysis or '(none)'}\n"
@@ -170,21 +194,21 @@ class MismatchChecker:
             result = await self._call_llm(messages)
         except Exception as e:
             logger.warning("[TAPE Judge] LLM call failed: %s — defaulting to IN_PROGRESS", e)
-            return SubgoalStatus.IN_PROGRESS
+            return SubgoalStatus.IN_PROGRESS, ""
 
         if result is None:
             logger.warning("[TAPE Judge] No tool call returned — defaulting to IN_PROGRESS")
-            return SubgoalStatus.IN_PROGRESS
+            return SubgoalStatus.IN_PROGRESS, ""
 
         decision = result.get("decision", "in_progress")
         reason = result.get("reason", "")
 
         if decision == "complete":
             logger.info("[TAPE Judge] COMPLETE: %s", reason)
-            return SubgoalStatus.COMPLETE
+            return SubgoalStatus.COMPLETE, reason
         elif decision == "replan":
             logger.info("[TAPE Judge] REPLAN: %s", reason)
-            return SubgoalStatus.REPLAN
+            return SubgoalStatus.REPLAN, reason
         else:
             logger.info("[TAPE Judge] IN_PROGRESS: %s", reason)
-            return SubgoalStatus.IN_PROGRESS
+            return SubgoalStatus.IN_PROGRESS, reason

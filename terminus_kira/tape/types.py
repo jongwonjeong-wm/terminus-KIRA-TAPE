@@ -22,12 +22,16 @@ class Subgoal:
     """
 
     id: str  # e.g., "subgoal_p0_s2"
-    description: str  # natural language subgoal
-    predicted_tool: ToolType  # which tool the simulator expects
+    subgoal_reason: str = ""  # why this step is necessary (from planner)
+    description: str = ""  # natural language subgoal
+    predicted_tool: ToolType = ToolType.EXECUTE_COMMANDS  # which tool the simulator expects
 
     # Populated by Simulator
+    state_reason: str = ""  # why this predicted state will result
     predicted_state: str = ""  # what terminal should look like after
+    duration_reason: str = ""  # why this step takes that long
     estimated_duration: float = 1.0  # seconds (cost for ILP)
+    reward_reason: str = ""  # why this reward score
     reward: float = 0.0  # 1=goal success, 0=normal, negative=risky
 
     # Populated during execution (for replanning calibration)
@@ -41,16 +45,26 @@ class Plan:
     plan_id: int
     subgoals: list[Subgoal] = field(default_factory=list)
     total_estimated_duration: float = 0.0  # sum of step durations
+    plan_rationale: str = ""  # overall approach reasoning from planner
 
 
 @dataclass
 class PlanNode:
-    """Node in the plan DAG. Represents a state."""
+    """Node in the plan DAG. Represents a state.
+
+    reward follows the paper (Section 3.2): scalar reward per node,
+    representing how this state affects the probability of solving the task.
+      +1  = goal state (task solved)
+      0~1 = state that helps reach the goal
+      -1~0 = state that moves toward failure
+      0   = neutral
+    """
 
     node_id: str
     state_description: str
     is_start: bool = False
     is_goal: bool = False
+    reward: float = 0.0
 
 
 @dataclass
@@ -61,7 +75,6 @@ class PlanEdge:
     from_node: str  # node_id
     to_node: str  # node_id
     subgoal: Subgoal
-    reward: float  # 1=goal, 0=normal, negative=risky
     cost: float  # estimated_duration
 
 

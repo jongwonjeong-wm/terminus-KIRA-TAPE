@@ -54,6 +54,12 @@ class TerminusKiraTAPE(TerminusKira):
     def __init__(self, *args, tape_config: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         cfg = tape_config or {}
+        # Increase proactive summarization threshold to 80k so we summarize early
+        # enough to absorb large terminal outputs (e.g. RStan/OPAM compilation).
+        # Default of 8k is too small: one big episode can add >8k tokens and crash.
+        self._proactive_summarization_threshold = int(
+            os.environ.get("TAPE_SUMMARIZE_THRESHOLD", cfg.get("summarize_threshold", 80000))
+        )
         # Hyperparameters: tape_config dict -> env var -> default
         self._tape_m = int(os.environ.get("TAPE_M", cfg.get("M", 4)))
         self._tape_time_budget_override = (
@@ -83,7 +89,9 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_tool_choice: dict | None = None
         self._tape_tools: list[dict] | None = None
         self._tape_replan_count: int = 0
-        self._tape_terminal_history: str = ""  # unused, kept for compat
+        self._tape_execution_history: list[dict] = []  # {"description": str, "status": "finished"|"replanned", "reason": str}
+        self._tape_pending_replan_reason: str = ""  # injected into agent on first ep of new plan
+        self._tape_last_in_progress_raw: str = ""  # last raw terminal_output during IN_PROGRESS
         self._tape_subgoal_injected: bool = False  # whether subgoal was already injected for current step
         self._tape_subgoal_start_time: float | None = None  # wall-clock start of current subgoal
         self._tape_consecutive_in_progress: int = 0  # consecutive IN_PROGRESS count for current subgoal
@@ -126,63 +134,24 @@ class TerminusKiraTAPE(TerminusKira):
     # TAPE Planning Pipeline
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _build_history_context(chat: Chat | None, extra_context: str = "") -> str:
-        """Build interaction history from chat messages for the planner.
+    def _build_history_context(self, extra_context: str = "") -> str:
+        """Build compact history context for the planner/simulator.
 
-        Assistant messages store executed commands in tool_calls, not in content.
-        We extract function name + arguments from tool_calls to show what was executed.
+        Uses _tape_execution_history (subgoal-level summaries of past subgoals)
+        rather than raw chat messages. The current subgoal's terminal state is
+        passed separately as current_terminal_state, so we only need past context here.
         """
         parts = []
 
-        if chat is not None:
-            for msg in chat.messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                tool_calls = msg.get("tool_calls", [])
-
-                if role == "system":
-                    continue
-
-                if role == "assistant":
-                    # Extract agent's reasoning/content
-                    agent_parts = []
-                    if content and isinstance(content, str):
-                        truncated = content[:800] + "...(truncated)" if len(content) > 800 else content
-                        agent_parts.append(truncated)
-                    # Extract executed tool calls (commands, task_complete, image_read)
-                    if tool_calls:
-                        for tc in tool_calls:
-                            func = tc.get("function", {})
-                            func_name = func.get("name", "unknown")
-                            args_raw = func.get("arguments", "{}")
-                            try:
-                                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                            except (json.JSONDecodeError, TypeError):
-                                args = {"raw": str(args_raw)[:200]}
-                            if func_name == "execute_commands":
-                                cmds = args.get("commands", [])
-                                cmd_strs = []
-                                for c in cmds:
-                                    if isinstance(c, dict):
-                                        cmd_strs.append(c.get("keystrokes", "").rstrip("\n"))
-                                    elif isinstance(c, str):
-                                        cmd_strs.append(c.rstrip("\n"))
-                                if cmd_strs:
-                                    agent_parts.append(f"Commands: {cmd_strs}")
-                            elif func_name == "task_complete":
-                                agent_parts.append("Action: task_complete")
-                            elif func_name == "image_read":
-                                agent_parts.append(f"Action: image_read({args.get('file_path', '')})")
-                    if agent_parts:
-                        parts.append(f"[Agent]:\n" + "\n".join(agent_parts))
-
-                elif role == "user":
-                    if content and isinstance(content, str):
-                        truncated = content[:1000] + "...(truncated)" if len(content) > 1000 else content
-                        parts.append(f"[Observation]:\n{truncated}")
-
-                # Skip "tool" role messages — they just say "executed"
+        for entry in self._tape_execution_history:
+            desc = entry.get("description", "")
+            status = entry.get("status", "")
+            reason = entry.get("reason", "")
+            if status == "finished":
+                parts.append(f"[done] {desc}")
+            elif status == "replanned":
+                suffix = f" — replanned: {reason}" if reason else " — replanned"
+                parts.append(f"[replanned] {desc}{suffix}")
 
         if extra_context:
             parts.append(f"[Note]: {extra_context}")
@@ -190,19 +159,13 @@ class TerminusKiraTAPE(TerminusKira):
         if not parts:
             return ""
 
-        # Keep total history under ~8000 chars to fit in planner context
-        history = "\n\n".join(parts)
-        if len(history) > 8000:
-            history = "...(earlier history truncated)...\n\n" + history[-8000:]
-
-        return history
+        return "\n".join(parts)
 
     async def _tape_plan_and_select(
         self,
         task_instruction: str,
         current_terminal_state: str,
         chat_history_summary: str = "",
-        chat: Chat | None = None,
         logging_dir: Path | None = None,
     ) -> SelectedPath | None:
         """Full TAPE planning pipeline: plan -> simulate -> graph -> ILP."""
@@ -211,8 +174,9 @@ class TerminusKiraTAPE(TerminusKira):
         assert self._tape_graph_builder is not None
         assert self._tape_solver is not None
 
-        # Build history context from chat + any extra summary
-        history_context = self._build_history_context(chat, chat_history_summary)
+        # Build history context from execution history (subgoal-level summaries only).
+        # Current subgoal terminal state is passed separately as current_terminal_state.
+        history_context = self._build_history_context(chat_history_summary)
 
         # Step 1: Generate M candidate plans
         logger.info("[TAPE] Step 1/4: Generating %d candidate plans...", self._tape_m)
@@ -281,7 +245,6 @@ class TerminusKiraTAPE(TerminusKira):
                     from_node=from_node,
                     to_node=to_node,
                     subgoal=sg,
-                    reward=sg.reward,
                     cost=sg.estimated_duration,
                 )
             )
@@ -333,12 +296,52 @@ class TerminusKiraTAPE(TerminusKira):
         if subgoal is None:
             return terminal_output
 
-        step_num = selected_path.current_step_idx + 1
-        total_steps = selected_path.total_steps
+        idx = selected_path.current_step_idx
+        total = selected_path.total_steps
+        all_subgoals = [e.subgoal for e in selected_path.edges]
+
+        # Build plan overview: only current and upcoming (done items are in history_section)
+        plan_lines = []
+        for i, sg in enumerate(all_subgoals):
+            if i == idx:
+                plan_lines.append(f"  [current] {sg.description}")
+            elif i > idx:
+                plan_lines.append(f"  [next] {sg.description}")
+
+        est = subgoal.estimated_duration
+        duration_str = f"{est:.0f}s" if est is not None else "unknown"
+
+        # Build history from previously executed subgoals (across all plans)
+        history_lines = []
+        for entry in self._tape_execution_history:
+            if entry["status"] == "finished":
+                history_lines.append(f"  [done] {entry['description']}")
+            else:
+                reason = entry.get("reason", "")
+                suffix = f" — replanned: {reason}" if reason else " — replanned"
+                history_lines.append(f"  [replanned] {entry['description']}{suffix}")
+
+        # If a replan just happened, notify agent once then clear
+        replan_notice = ""
+        if self._tape_pending_replan_reason:
+            replan_notice = (
+                f"\n\n[REPLANNED] The previous approach did not work: {self._tape_pending_replan_reason}\n"
+                f"A new plan has been created. Focus on the new subgoals below.\n"
+            )
+            self._tape_pending_replan_reason = ""
+
+        history_section = ""
+        if history_lines:
+            history_section = "\n--- Previously completed ---\n" + "\n".join(history_lines) + "\n"
 
         subgoal_context = (
-            f"\n\n[SUBGOAL]: {subgoal.description}\n"
-            f"Expected outcome: {subgoal.predicted_state}\n"
+            replan_notice
+            + history_section
+            + f"\n--- Current plan ({idx}/{total} steps completed) ---\n"
+            + "\n".join(plan_lines)
+            + f"\n\nYour current subgoal: {subgoal.description}\n"
+            f"Expected subgoal outcome: {subgoal.predicted_state}\n"
+            f"Estimated subgoal duration: {duration_str}\n"
         )
 
         return terminal_output + subgoal_context
@@ -451,7 +454,6 @@ class TerminusKiraTAPE(TerminusKira):
         selected_path = await self._tape_plan_and_select(
             original_instruction,
             initial_terminal or "",
-            chat=chat,
             logging_dir=logging_dir,
         )
 
@@ -504,19 +506,16 @@ class TerminusKiraTAPE(TerminusKira):
                 self._tape_tool_choice = None
                 self._tape_tools = None
             elif not self._tape_subgoal_injected:
-                # First attempt at this subgoal — inject constraints
-                # 1. Inject subgoal into observation
+                # First episode of this subgoal — inject subgoal + force tool_choice
                 constrained_prompt = self._build_subgoal_prompt(prompt, selected_path)
-                # 2. Set tool_choice forcing
                 self._tape_tool_choice = self._build_tool_choice(
                     current_subgoal.predicted_tool
                 )
-                # 3. Modify tool descriptions
                 self._tape_tools = self._inject_subgoal_into_tools(current_subgoal)
                 self._tape_subgoal_injected = True
                 self._tape_subgoal_start_time = time.monotonic()
             else:
-                # IN_PROGRESS continuation — no tool_choice forcing
+                # IN_PROGRESS continuation — no tool_choice forcing, no subgoal re-injection
                 constrained_prompt = prompt
                 self._tape_tool_choice = None
                 # Block task_complete unless current subgoal is TASK_COMPLETE
@@ -688,6 +687,7 @@ class TerminusKiraTAPE(TerminusKira):
                     selected_path, current_subgoal,
                     terminal_output, observation,
                     original_instruction, chat, logging_dir, episode,
+                    replan_reason=replan_context,
                 )
                 if selected_path is None:
                     return episode
@@ -697,15 +697,28 @@ class TerminusKiraTAPE(TerminusKira):
 
             # --- STEP JUDGMENT: COMPLETE / IN_PROGRESS / REPLAN ---
             if self._tape_mismatch_checker is not None:
-                status = await self._tape_mismatch_checker.check(
+                elapsed = (
+                    time.monotonic() - self._tape_subgoal_start_time
+                    if self._tape_subgoal_start_time is not None else None
+                )
+                _predicted_state_ctx = (
+                    f"Assumptions: {current_subgoal.state_reason}\n"
+                    f"Predicted: {current_subgoal.predicted_state}"
+                    if current_subgoal.state_reason
+                    else current_subgoal.predicted_state
+                )
+                status, judge_reason = await self._tape_mismatch_checker.check(
                     terminal_history="",
                     current_terminal_output=terminal_output,
                     subgoal_description=current_subgoal.description,
-                    predicted_state=current_subgoal.predicted_state,
+                    predicted_state=_predicted_state_ctx,
                     task_instruction=original_instruction,
                     agent_analysis=analysis,
                     agent_plan=plan,
                     recent_outputs=self._tape_recent_outputs[-2:],
+                    estimated_duration=current_subgoal.estimated_duration,
+                    duration_reason=current_subgoal.duration_reason,
+                    elapsed_time=elapsed,
                 )
                 # Track recent outputs (keep last 2)
                 self._tape_recent_outputs.append(terminal_output)
@@ -718,20 +731,22 @@ class TerminusKiraTAPE(TerminusKira):
                         current_subgoal.actual_duration = time.monotonic() - self._tape_subgoal_start_time
                         self._tape_subgoal_start_time = None
                     logger.info(
-                        "[TAPE] REPLAN at step %d/%d (replan #%d): %s",
+                        "[TAPE] REPLAN at step %d/%d (replan #%d): %s — %s",
                         selected_path.current_step_idx + 1,
                         selected_path.total_steps,
                         self._tape_replan_count + 1,
                         current_subgoal.description,
+                        judge_reason,
                     )
                     self._dump_tape_judgment(
                         logging_dir, episode, current_subgoal.description,
-                        "replan", terminal_output,
+                        "replan", terminal_output, reason=judge_reason,
                     )
                     selected_path, episode = await self._handle_replan(
                         selected_path, current_subgoal,
                         terminal_output, observation,
                         original_instruction, chat, logging_dir, episode,
+                        replan_reason=judge_reason,
                     )
                     if selected_path is None:
                         return episode
@@ -744,7 +759,7 @@ class TerminusKiraTAPE(TerminusKira):
                     self._tape_consecutive_in_progress += 1
                     self._dump_tape_judgment(
                         logging_dir, episode, current_subgoal.description,
-                        "in_progress", terminal_output,
+                        "in_progress", terminal_output, reason=judge_reason,
                     )
                     logger.info(
                         "[TAPE] IN_PROGRESS step %d/%d (%d consecutive): %s",
@@ -753,27 +768,44 @@ class TerminusKiraTAPE(TerminusKira):
                         self._tape_consecutive_in_progress,
                         current_subgoal.description,
                     )
-                    # After 2 consecutive IN_PROGRESS, compact the observation
-                    # to avoid context explosion from repetitive compilation logs
-                    if self._tape_consecutive_in_progress > 2:
-                        prompt = (
-                            f"[Still in progress: {current_subgoal.description}] "
-                            f"Waiting ({self._tape_consecutive_in_progress} checks). "
-                            f"Continue working on this subgoal."
-                        )
+                    # Deduplicate: compare raw terminal_output to extract truly new content.
+                    # Avoids context explosion from repetitive terminal output during
+                    # long-running processes (installs, compilations).
+                    if self._tape_last_in_progress_raw and terminal_output.startswith(self._tape_last_in_progress_raw):
+                        new_part = terminal_output[len(self._tape_last_in_progress_raw):]
+                        if new_part.strip():
+                            prompt = (
+                                f"New output since last check:\n"
+                                f"{self._limit_output_length(new_part)}"
+                            )
+                        else:
+                            prompt = "No new terminal output since last check."
                     else:
-                        prompt = observation
+                        # Output structure changed (e.g. grew past limit) — send tail only
+                        prompt = (
+                            f"New output since last check:\n"
+                            f"{terminal_output[-15000:]}"
+                        ) if terminal_output != self._tape_last_in_progress_raw else (
+                            f"No new terminal output since last check."
+                        )
+                    self._tape_last_in_progress_raw = terminal_output
                     episode += 1
                     continue
 
             # COMPLETE — subgoal achieved, move to next subgoal
             self._tape_consecutive_in_progress = 0
+            self._tape_last_in_progress_raw = ""
             if self._tape_subgoal_start_time is not None:
                 current_subgoal.actual_duration = time.monotonic() - self._tape_subgoal_start_time
                 self._tape_subgoal_start_time = None
+            self._tape_execution_history.append({
+                "description": current_subgoal.description,
+                "status": "finished",
+                "reason": "",
+            })
             self._dump_tape_judgment(
                 logging_dir, episode, current_subgoal.description,
-                "complete", terminal_output,
+                "complete", terminal_output, reason=judge_reason,
             )
             logger.info(
                 "[TAPE] COMPLETE step %d/%d: %s (predicted=%.1fs, actual=%.1fs)",
@@ -916,6 +948,7 @@ class TerminusKiraTAPE(TerminusKira):
         self, selected_path, current_subgoal,
         terminal_output, observation,
         original_instruction, chat, logging_dir, episode,
+        replan_reason: str = "",
     ) -> tuple[SelectedPath | None, int]:
         """Handle replanning after a mismatch. Returns (new_path, episode)."""
         self._tape_replan_count += 1
@@ -940,7 +973,26 @@ class TerminusKiraTAPE(TerminusKira):
                     f"- \"{sg.description}\": predicted {sg.estimated_duration:.1f}s, actual {sg.actual_duration:.1f}s"
                 )
 
-        history_parts = [f"Previous plan failed at step: {current_subgoal.description}."]
+        # Record this replan in history
+        self._tape_execution_history.append({
+            "description": current_subgoal.description,
+            "status": "replanned",
+            "reason": replan_reason,
+        })
+
+        # Build chronological execution timeline
+        history_parts = []
+        if self._tape_execution_history:
+            timeline_lines = []
+            for i, entry in enumerate(self._tape_execution_history, 1):
+                if entry["status"] == "finished":
+                    timeline_lines.append(f"{i}) {entry['description']} (Finished)")
+                else:
+                    line = f"{i}) {entry['description']} → Replanned"
+                    if entry["reason"]:
+                        line += f" due to: {entry['reason']}"
+                    timeline_lines.append(line)
+            history_parts.append("Execution history:\n" + "\n".join(timeline_lines))
         if calibration_lines:
             history_parts.append(
                 "Execution time calibration from completed steps:\n" + "\n".join(calibration_lines)
@@ -951,7 +1003,6 @@ class TerminusKiraTAPE(TerminusKira):
             original_instruction,
             terminal_output,
             chat_history_summary="\n".join(history_parts),
-            chat=chat,
             logging_dir=logging_dir,
         )
 
@@ -970,6 +1021,8 @@ class TerminusKiraTAPE(TerminusKira):
         self._tape_subgoal_injected = False  # reset for new plan
         self._tape_subgoal_start_time = None  # reset for new plan
         self._tape_consecutive_in_progress = 0  # reset for new plan
+        self._tape_last_in_progress_raw = ""  # reset for new plan
+        self._tape_pending_replan_reason = replan_reason  # will be shown to agent on first ep
         return new_path, episode
 
     async def _run_vanilla_remaining(
@@ -1012,9 +1065,11 @@ class TerminusKiraTAPE(TerminusKira):
         for p in plans:
             plans_data.append({
                 "plan_id": p.plan_id,
+                "plan_rationale": p.plan_rationale,
                 "subgoals": [
                     {
                         "id": sg.id,
+                        "subgoal_reason": sg.subgoal_reason,
                         "description": sg.description,
                         "predicted_tool": sg.predicted_tool.value,
                     }
@@ -1036,9 +1091,12 @@ class TerminusKiraTAPE(TerminusKira):
                         "id": sg.id,
                         "description": sg.description,
                         "predicted_tool": sg.predicted_tool.value,
+                        "state_reason": sg.state_reason,
                         "predicted_state": sg.predicted_state,
-                        "reward": sg.reward,
+                        "duration_reason": sg.duration_reason,
                         "estimated_duration": sg.estimated_duration,
+                        "reward_reason": sg.reward_reason,
+                        "reward": sg.reward,
                     }
                     for sg in p.subgoals
                 ],
@@ -1056,6 +1114,7 @@ class TerminusKiraTAPE(TerminusKira):
                     "state_description": n.state_description,
                     "is_start": n.is_start,
                     "is_goal": n.is_goal,
+                    "reward": n.reward,
                 }
                 for nid, n in graph.nodes.items()
             },
@@ -1063,7 +1122,6 @@ class TerminusKiraTAPE(TerminusKira):
                 eid: {
                     "from": e.from_node,
                     "to": e.to_node,
-                    "reward": e.reward,
                     "cost": e.cost,
                     "subgoal": e.subgoal.description if e.subgoal else None,
                 }
@@ -1087,7 +1145,7 @@ class TerminusKiraTAPE(TerminusKira):
                     "subgoal": e.subgoal.description if e.subgoal else None,
                     "predicted_tool": e.subgoal.predicted_tool.value if e.subgoal else None,
                     "predicted_state": e.subgoal.predicted_state if e.subgoal else None,
-                    "reward": e.reward,
+                    "reward": graph.nodes[e.to_node].reward if e.to_node in graph.nodes else 0.0,
                     "cost": e.cost,
                 }
                 for e in selected.edges
@@ -1106,6 +1164,7 @@ class TerminusKiraTAPE(TerminusKira):
         subgoal_description: str,
         decision: str,
         terminal_output: str,
+        reason: str = "",
     ) -> None:
         """Dump step judge result alongside the episode directory."""
         if logging_dir is None:
@@ -1116,6 +1175,7 @@ class TerminusKiraTAPE(TerminusKira):
             "episode": episode,
             "subgoal": subgoal_description,
             "decision": decision,
+            "reason": reason,
             "terminal_output_snippet": terminal_output[-1000:] if len(terminal_output) > 1000 else terminal_output,
         }
         judge_file.write_text(json.dumps(judge_data, indent=2, ensure_ascii=False))

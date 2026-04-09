@@ -43,6 +43,11 @@ _SUBMIT_STEP_DESC = (
     "Predict the semantic outcome of executing this subgoal."
 )
 
+_STATE_REASON_DESC = (
+    "Explain what will happen when this subgoal is executed from the current state. "
+    "Consider the environment, dependencies, and likely outcomes before committing to a predicted state."
+)
+
 _PREDICTED_STATE_DESC = (
     "Abstract description of what changes after this step. "
     "Describe WHAT was accomplished (files created, services started, errors hit), "
@@ -56,10 +61,27 @@ _ESTIMATED_DURATION_DESC = (
     "Sum up all commands the agent would run for this subgoal."
 )
 
+_DURATION_REASON_DESC = (
+    "Brief reason why this step takes that long."
+)
+
+_REWARD_REASON_DESC = (
+    "Explain why this state gets that reward score. "
+    "Reference the task goal: does this state directly solve the task (reward=1), "
+    "bring the agent meaningfully closer to the solution (0 < reward < 1), "
+    "neither help nor hurt (reward=0), "
+    "or move toward failure / waste effort (reward < 0)?"
+)
+
 _REWARD_DESC = (
-    "1 if this step results in successful task completion (goal state). "
-    "0 for normal intermediate steps. "
-    "Between -1 and 0 if this step is likely to fail — closer to -1 for higher risk."
+    "Rate the resulting STATE (not the action) — how does being in this state "
+    "affect the probability of ultimately solving the task? "
+    "1 = this IS the goal state (task solved). "
+    "Between 0 and 1 = state that brings the agent closer to the correct solution "
+    "(e.g., 0.8 for a verified working setup, 0.3 for basic progress). "
+    "Between -1 and 0 = state that moves toward failure or wastes effort "
+    "(e.g., -0.5 for a broken build, -0.2 for an unnecessary detour). "
+    "0 = neutral state that neither helps nor hurts."
 )
 
 # Tool definition for a single step simulation
@@ -72,20 +94,32 @@ SIMULATOR_STEP_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "state_reason": {
+                        "type": "string",
+                        "description": _STATE_REASON_DESC,
+                    },
                     "predicted_state": {
                         "type": "string",
                         "description": _PREDICTED_STATE_DESC,
                     },
+                    "duration_reason": {
+                        "type": "string",
+                        "description": _DURATION_REASON_DESC,
+                    },
                     "estimated_duration": {
                         "type": "number",
                         "description": _ESTIMATED_DURATION_DESC,
+                    },
+                    "reward_reason": {
+                        "type": "string",
+                        "description": _REWARD_REASON_DESC,
                     },
                     "reward": {
                         "type": "number",
                         "description": _REWARD_DESC,
                     },
                 },
-                "required": ["predicted_state", "estimated_duration", "reward"],
+                "required": ["state_reason", "predicted_state", "duration_reason", "estimated_duration", "reward_reason", "reward"],
             },
         },
     },
@@ -237,8 +271,11 @@ class TAPESimulator:
                 result, assistant_msg = None, None
 
             if result is not None and assistant_msg is not None:
+                sg.state_reason = result.get("state_reason", "")
                 sg.predicted_state = result.get("predicted_state", "")
+                sg.duration_reason = result.get("duration_reason", "")
                 sg.estimated_duration = float(result.get("estimated_duration", 1.0))
+                sg.reward_reason = result.get("reward_reason", "")
                 sg.reward = float(result.get("reward", 0.0))
 
                 # Append assistant response + tool result to conversation
